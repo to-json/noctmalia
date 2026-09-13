@@ -1,0 +1,79 @@
+{
+  "manifest_version": 2,
+  "name": "noctmalia bridge",
+  "description": "Exposes Thunderbird mail and calendar to mailnd over native messaging.",
+  "version": "0.1.0",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "bridge@noctmalia",
+      "strict_min_version": "153.0"
+    }
+  },
+  "permissions": [
+    "accountsRead",
+    "accountsFolders",
+    "accountsIdentities",
+    "messagesRead",
+    "messagesMove",
+    "messagesUpdate",
+    "messagesDelete",
+    "messagesImport",
+    "messagesTags",
+    "messagesTagsList",
+    "nativeMessaging"
+  ],
+  "optional_permissions": [
+    "messages.send"
+  ],
+  "background": {
+    "scripts": ["background.js"]
+  },
+  "experiment_apis": {
+    "noctmalia": {
+      "schema": "experiments/noctmalia/schema.json",
+      "parent": {
+        "scopes": ["addon_parent"],
+        "script": "experiments/noctmalia/parent.js",
+        "paths": [["noctmalia"]]
+      }
+    },
+    "calendar_calendars": {
+      "schema": "experiments/calendar/schema/calendar-calendars.json",
+      "parent": {
+        "scopes": ["addon_parent"],
+        "script": "experiments/calendar/parent/ext-calendar-calendars.js",
+        "paths": [["calendar", "calendars"]]
+      }
+    },
+    "calendar_items": {
+      "schema": "experiments/calendar/schema/calendar-items.json",
+      "parent": {
+        "scopes": ["addon_parent"],
+        "script": "experiments/calendar/parent/ext-calendar-items.js",
+        "paths": [["calendar", "items"]]
+      }
+    },
+    "calendar_provider": {
+      "schema": "experiments/calendar/schema/calendar-provider.json",
+      "parent": {
+        "scopes": ["addon_parent"],
+        "script": "experiments/calendar/parent/ext-calendar-provider.js",
+        "events": ["startup"],
+        "paths": [["calendar", "provider"]]
+      }
+    },
+    "calendar_timezones": {
+      "schema": "experiments/calendar/schema/calendar-timezones.json",
+      "parent": {
+        "scopes": ["addon_parent"],
+        "script": "experiments/calendar/parent/ext-calendar-timezones.js",
+        "paths": [["calendar", "timezones"]]
+      },
+      "child": {
+        "scopes": ["addon_child"],
+        "script": "experiments/calendar/child/ext-calendar-timezones.js",
+        "paths": [["calendar", "timezones"]]
+      }
+    }
+  }
+}

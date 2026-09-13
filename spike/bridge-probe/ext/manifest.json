@@ -1,0 +1,4 @@
+{ "manifest_version": 2, "name": "bridge-probe", "version": "0.1",
+  "browser_specific_settings": {"gecko": {"id": "probe@noctmalia", "strict_min_version": "115.0"}},
+  "permissions": ["accountsRead","accountsFolders","messagesRead","messagesImport","messagesMove","messagesUpdate","http://127.0.0.1/*"],
+  "background": {"scripts": ["bg.js"]} }

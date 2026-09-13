@@ -1,0 +1,23 @@
+const post = (t, d) => fetch("http://127.0.0.1:8765/" + t, {method: "POST", body: JSON.stringify(d)});
+const step = async (n, f) => { try { const r = await f(); await post(n, r ?? "ok"); return r; } catch (e) { await post(n + "!ERR", String(e)); } };
+const ical = d => d.toISOString().replace(/\.\d+Z$/, "Z").replace(/[:-]/g, "");
+const vevent = (uid, title, s, e, extra = "") => `BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//noctmalia//probe//EN\r\nBEGIN:VEVENT\r\nUID:${uid}\r\nSUMMARY:${title}\r\nDTSTART:${ical(s)}\r\nDTEND:${ical(e)}\r\n${extra}END:VEVENT\r\nEND:VCALENDAR\r\n`;
+(async () => {
+  const L = messenger.calendar;
+  L.items.onCreated.addListener(i => post("EVENT items.onCreated", {id: i.id, calendarId: i.calendarId}), {returnFormat: "ical"});
+  L.items.onUpdated.addListener((i, ch) => post("EVENT items.onUpdated", {id: i.id, ch}), {returnFormat: "ical"});
+  L.items.onRemoved.addListener((c, id) => post("EVENT items.onRemoved", {c, id}));
+  await new Promise(r => setTimeout(r, 5000));
+  const c = await step("calendars.create", () => L.calendars.create({type: "storage", url: "moz-storage-calendar://", name: "probe"}));
+  const now = new Date(), h = 3600e3, day = 864e5;
+  await step("items.create(single)", () => L.items.create(c.id, {id: "probe-1", type: "event", format: "ical", item: vevent("probe-1", "probe event", now, new Date(+now + h)), returnFormat: "ical"}));
+  await step("items.create(weekly x4)", () => L.items.create(c.id, {id: "probe-rrule", type: "event", format: "ical", item: vevent("probe-rrule", "standup", now, new Date(+now + h / 2), "RRULE:FREQ=WEEKLY;COUNT=4\r\n"), returnFormat: "jcal"}));
+  await step("items.get(jcal)", () => L.items.get(c.id, "probe-1", {returnFormat: "jcal"}));
+  await step("items.query(range 30d, expand)", async () => (await L.items.query({calendarId: c.id, type: "event", rangeStart: ical(new Date(+now - day)), rangeEnd: ical(new Date(+now + 30 * day)), expand: true, returnFormat: "ical"})).map(i => ({id: i.id, instance: i.instance, summary: /SUMMARY:(.*)/.exec(i.item)?.[1]})));
+  await step("items.query(all calendars)", async () => (await L.items.query({})).length);
+  await step("items.update", () => L.items.update(c.id, "probe-1", {format: "ical", item: vevent("probe-1", "probe renamed", now, new Date(+now + 2 * h)), returnFormat: "ical"}));
+  await step("items.remove", () => L.items.remove(c.id, "probe-1"));
+  await step("items.query(after remove)", async () => (await L.items.query({calendarId: c.id})).map(i => i.id));
+  await new Promise(r => setTimeout(r, 1500));
+  await post("done", 1);
+})();

@@ -1,0 +1,1 @@
+[{"namespace": "dbg", "functions": [{"name": "run", "type": "function", "async": true, "parameters": [{"name": "code", "type": "string"}]}]}]

@@ -1,0 +1,17 @@
+[10] Sandbox: CanCreateUserNamespace() clone() failure: EPERM
+Mozilla Thunderbird 140.15.0esr
+== /calendars.create {"id":"527c6e93-4ca8-4962-976d-4f7568483b6b","type":"storage","name":"probe","url":"moz-storage-calendar://","readOnly":false,"visible":true,"showReminders":true,"enabled":true,"color":"#A8C2E1"}
+== /EVENT%20items.onCreated {"id":"probe-1","calendarId":"527c6e93-4ca8-4962-976d-4f7568483b6b"}
+== /items.create(single) {"type":"event","id":"probe-1","calendarId":"527c6e93-4ca8-4962-976d-4f7568483b6b","format":"ical","item":"BEGIN:VCALENDAR\r\nPRODID:-//Mozilla.org/NONSGML Mozilla Calendar V1.1//EN\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:probe-1\r\nSUMMARY:probe event\r\nDTSTART:20260913T074757Z\r\nDTEND:20260913T084757Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"}
+== /EVENT%20items.onCreated {"id":"probe-rrule","calendarId":"527c6e93-4ca8-4962-976d-4f7568483b6b"}
+== /items.create(weekly%20x4) {"type":"event","id":"probe-rrule","calendarId":"527c6e93-4ca8-4962-976d-4f7568483b6b","format":"jcal","item":["vcalendar",[["prodid",{},"text","-//Mozilla.org/NONSGML Mozilla Calendar V1.1//EN"],["version",{},"text","2.0"]],[["vevent",[["uid",{},"text","probe-rrule"],["summary",{},"text","standup"],["rrule",{},"recur",{"freq":"WEEKLY","count":4}],["dtstart",{},"date-time","2026-09-13T07:47:57Z"],["dtend",{},"date-time","2026-09-13T08:17:57Z"]],[]]]]}
+== /items.get(jcal) {"type":"event","id":"probe-1","calendarId":"527c6e93-4ca8-4962-976d-4f7568483b6b","format":"jcal","item":["vcalendar",[["prodid",{},"text","-//Mozilla.org/NONSGML Mozilla Calendar V1.1//EN"],["version",{},"text","2.0"]],[["vevent",[["uid",{},"text","probe-1"],["summary",{},"text","probe event"],["dtstart",{},"date-time","2026-09-13T07:47:57Z"],["dtend",{},"date-time","2026-09-13T08:47:57Z"]],[]]]]}
+== /items.query(range%2030d,%20expand) [{"id":"probe-1","summary":"probe event"},{"id":"probe-rrule","instance":"2026-09-13T07:47:57Z","summary":"standup"},{"id":"probe-rrule","instance":"2026-09-20T07:47:57Z","summary":"standup"},{"id":"probe-rrule","instance":"2026-09-27T07:47:57Z","summary":"standup"},{"id":"probe-rrule","instance":"2026-10-04T07:47:57Z","summary":"standup"}]
+== /items.query(all%20calendars) 2
+== /EVENT%20items.onUpdated {"id":"probe-1","ch":{}}
+== /items.update {"type":"event","id":"probe-1","calendarId":"527c6e93-4ca8-4962-976d-4f7568483b6b","format":"ical","item":"BEGIN:VCALENDAR\r\nPRODID:-//Mozilla.org/NONSGML Mozilla Calendar V1.1//EN\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nLAST-MODIFIED:20260913T074757Z\r\nDTSTAMP:20260913T074757Z\r\nUID:probe-1\r\nSUMMARY:probe renamed\r\nDTSTART:20260913T074757Z\r\nDTEND:20260913T094757Z\r\nX-MOZ-GENERATION:1\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"}
+== /EVENT%20items.onRemoved {"c":"527c6e93-4ca8-4962-976d-4f7568483b6b","id":"probe-1"}
+== /items.remove "ok"
+== /items.query(after%20remove) ["probe-rrule"]
+== /done 1
+-- log:

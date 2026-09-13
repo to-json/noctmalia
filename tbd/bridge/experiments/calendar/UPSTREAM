@@ -1,0 +1,3 @@
+Vendored from https://github.com/thunderbird/webext-experiments/tree/main/calendar/experiments/calendar
+commit b7f7cb3e76807903a785a03784d6e7df7b213f21 (2026-04-20)
+Unmodified. Re-vendor and re-run tools/smoke.sh on every Thunderbird bump.

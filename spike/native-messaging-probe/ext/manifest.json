@@ -1,0 +1,4 @@
+{ "manifest_version": 2, "name": "nm-probe", "version": "0.1",
+  "browser_specific_settings": {"gecko": {"id": "nm@noctmalia"}},
+  "permissions": ["nativeMessaging","http://127.0.0.1/*"],
+  "background": {"scripts": ["bg.js"]} }

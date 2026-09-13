@@ -1,0 +1,35 @@
+[
+  {
+    "namespace": "noctmalia",
+    "functions": [
+      {
+        "name": "grantOptionalPermissions",
+        "type": "function",
+        "async": true,
+        "description": "Grant every missing optional permission from the manifest. Returns the permissions that were missing.",
+        "parameters": []
+      },
+      {
+        "name": "checkMail",
+        "type": "function",
+        "async": true,
+        "description": "Fetch new mail now for one account, or all accounts when omitted. Returns the account ids checked.",
+        "parameters": [{ "name": "accountId", "type": "string", "optional": true }]
+      },
+      {
+        "name": "provisionAccount",
+        "type": "function",
+        "async": true,
+        "description": "Create a password-authenticated IMAP+SMTP account. Idempotent on (imap.username, imap.host).",
+        "parameters": [{ "name": "config", "type": "object", "additionalProperties": { "type": "any" } }]
+      },
+      {
+        "name": "devEval",
+        "type": "function",
+        "async": true,
+        "description": "Run privileged code in the parent process. Disabled unless pref extensions.noctmalia.dev is true.",
+        "parameters": [{ "name": "code", "type": "string" }]
+      }
+    ]
+  }
+]

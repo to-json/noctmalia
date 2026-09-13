@@ -1,0 +1,18 @@
+{
+  "manifest_version": 2,
+  "name": "boundary-spike",
+  "version": "0.1",
+  "browser_specific_settings": { "gecko": { "id": "spike@noctmalia", "strict_min_version": "153.0" } },
+  "permissions": ["accountsRead", "messagesRead", "compose", "compose.send", "compose.save", "addressBooks", "http://127.0.0.1/*"],
+  "background": { "scripts": ["bg.js"] },
+  "experiment_apis": {
+    "noctmalia": { "schema": "experiments/noctmalia/schema.json",
+      "parent": { "scopes": ["addon_parent"], "script": "experiments/noctmalia/parent.js", "paths": [["noctmalia"]] } },
+    "calendar_calendars": { "schema": "experiments/calendar/schema/calendar-calendars.json",
+      "parent": { "scopes": ["addon_parent"], "script": "experiments/calendar/parent/ext-calendar-calendars.js", "paths": [["calendar", "calendars"]] } },
+    "calendar_items": { "schema": "experiments/calendar/schema/calendar-items.json",
+      "parent": { "scopes": ["addon_parent"], "script": "experiments/calendar/parent/ext-calendar-items.js", "paths": [["calendar", "items"]] } },
+    "calendar_provider": { "schema": "experiments/calendar/schema/calendar-provider.json",
+      "parent": { "scopes": ["addon_parent"], "script": "experiments/calendar/parent/ext-calendar-provider.js", "events": ["startup"], "paths": [["calendar", "provider"]] } }
+  }
+}
