@@ -18,7 +18,7 @@ thunderbird --headless ── bridge (MailExtension) ── nm-shim ──►  n
 | `crates/noctmalia-bridge` | The protocol: binds the socket, matches replies by id, streams events |
 | `crates/noctmalia` | The app: vCard parsing, contacts calls, theme/font, the rolodex window |
 | `tbd/` | The Thunderbird container and the bridge extension. Protocol reference: `tbd/README.md` |
-| `tools/` | `fake-bridge.py` (a Thunderbird stand-in), `bridgectl.py` + `mailnd-stub.py` (a CLI path), `smoke.sh` |
+| `tools/` | `fixture.py` (the test data), `seed.sh`/`seed.py` (put it in a real profile), `fake-bridge.py` (a Thunderbird stand-in), `bridgectl.py` + `mailnd-stub.py` (a CLI path), `smoke.sh` |
 | `docs/findings.md` | What has actually been verified, and the gotchas behind it |
 | `docs/design.md` | Where this is going |
 
@@ -55,6 +55,26 @@ tools/fake-bridge.py                  # connects to it and serves contacts from 
 
 ### Against the real thing
 
+Docker needs to be usable first. `docker.socket` is socket-activated on Arch, so group membership is
+usually the only thing missing:
+
+```sh
+sudo usermod -aG docker "$USER"    # then log out and back in, or `newgrp docker` for one shell
+```
+
+Boot a headless Thunderbird and put the test data in it:
+
+```sh
+tools/seed.sh                         # stack up, wait for the bridge, seed accounts + contacts
+tools/seed.sh --reset                 # ...replacing fixture contacts already there
+```
+
+Both the accounts and the contacts come from `tools/fixture.py`, which is also what
+`tools/fake-bridge.py` serves — so the same people are on screen either way. Seeding is idempotent
+and keeps the profile volume; `docker compose down -v` starts over.
+
+Then hand the socket to the UI — only one client may hold it, and seeding used the CLI stub:
+
 ```sh
 docker compose -f compose.yaml -f compose.ui.yaml up -d --build tbd
 scripts/run.sh
@@ -63,12 +83,6 @@ scripts/run.sh
 The overlay bind-mounts the socket directory into `$XDG_RUNTIME_DIR` — a host process cannot reach a
 named Docker volume. tbd runs as uid 1000 and the socket is mode 0660, so the desktop user must be
 uid 1000 (`id -u`). Either process can start first; the shim retries forever.
-
-Docker needs to be usable first:
-
-```sh
-sudo usermod -aG docker "$USER" && sudo systemctl enable --now docker   # then log out and back in
-```
 
 ## Looking like the rest of the desktop
 
@@ -85,4 +99,5 @@ noctalia-iced used to hardcode one palette. Both now come from the system.
   disconnect, the 1 MiB cap), vCard round-tripping, and contacts list/search/create/update/delete —
   the last against `tools/fake-bridge.py`, not against Thunderbird itself.
 - **Not yet run against a real Thunderbird.** That is the next step, and the one most likely to turn
-  up surprises: `docs/findings.md` §8 lists what to watch for.
+  up surprises: `docs/findings.md` §8 lists what to watch for. `tools/seed.sh` is written and its
+  logic is tested against the stand-ins, but no container has been started on this machine.

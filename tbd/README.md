@@ -20,8 +20,15 @@ thunderbird --headless
 docker compose up -d --build              # tbd + the CLI stub
 docker compose exec mailnd python /tools/bridgectl.py status
 docker compose exec mailnd python /tools/bridgectl.py call accounts.list
+tools/seed.sh                             # stack up + the development fixture in the profile
 tools/smoke.sh                            # full end-to-end test against GreenMail (wipes volumes)
 ```
+
+`tools/seed.sh` is the one to reach for: it starts the stack with the dev pref on and GreenMail
+carrying the fixture's users, waits for `bridge.hello`, then runs `tools/seed.py` to provision the
+mail accounts and write the address books and contacts. It is idempotent and keeps the profile, so
+re-run it freely; `--reset` replaces the fixture's own contacts. The fixture lives in
+`tools/fixture.py`, and is the same data `tools/fake-bridge.py` serves without a container.
 
 | Env | Default | Meaning |
 |---|---|---|

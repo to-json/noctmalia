@@ -72,11 +72,12 @@ async fn lists_books_and_every_contact_in_them() {
     let Some((bridge, books, _fake, _socket)) = attached("list").await else { return };
 
     assert_eq!(books.len(), 3);
-    assert_eq!(books[0].id, "personal");
+    // By id, not by position: the fixture is shared with tools/seed.py and may be reordered.
+    let book = |id: &str| books.iter().find(|book| book.id == id).expect("a book with this id");
     // The rail marks these; getting the flags wrong would offer writes into a read-only book.
-    assert!(!books[0].read_only && !books[0].remote);
-    assert!(books[1].remote, "the CardDAV book is remote");
-    assert!(books[2].read_only, "collected addresses are read-only");
+    assert!(!book("personal").read_only && !book("personal").remote);
+    assert!(book("work").remote, "the remote book is marked remote");
+    assert!(book("collected").read_only, "collected addresses are read-only");
 
     let all = contacts::list(bridge.clone(), None, books.clone()).await.expect("list");
     assert_eq!(all.len(), 7);

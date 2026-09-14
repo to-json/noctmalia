@@ -17,63 +17,27 @@ import socket
 import sys
 import time
 
+import fixture
+
 DEFAULT_SOCKET = os.path.join(
     os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "noctmalia", "bridge.sock"
 )
 
 
-def vcard(fn, last, first, org="", title="", emails=(), tels=(), note="", extra=()):
-    lines = ["BEGIN:VCARD", "VERSION:4.0", f"FN:{fn}", f"N:{last};{first};;;"]
-    if org:
-        lines.append(f"ORG:{org}")
-    if title:
-        lines.append(f"TITLE:{title}")
-    for kind, value in emails:
-        lines.append(f"EMAIL;TYPE={kind}:{value}")
-    for kind, value in tels:
-        lines.append(f"TEL;TYPE={kind}:{value}")
-    if note:
-        lines.append(f"NOTE:{note}")
-    lines.extend(extra)
-    lines.append("END:VCARD")
-    return "\r\n".join(lines) + "\r\n"
-
-
-SEED = [
-    ("personal", vcard("Alice Chen", "Chen", "Alice", "Noctalia", "Compositor wrangler",
-                       [("work", "alice@noctalia.dev"), ("home", "alice@example.com")],
-                       [("cell", "+1 555 0100")], "Owes me a compositor patch.",
-                       ["UID:urn:uuid:alice-0001", "X-THUNDERBIRD-KEEP:round-tripped"])),
-    ("personal", vcard("Bob Builder", "Builder", "Bob", "", "",
-                       [("home", "bob@example.com")], [("work", "+1 555 0111")])),
-    ("personal", vcard("Dana Okoro", "Okoro", "Dana", "Thunderbird", "Release engineer",
-                       [("work", "dana@thunderbird.example")], [],
-                       "Ask about the calendar Experiment.",
-                       ["ADR;TYPE=work:;;1 Long Street;Springfield;OR;97477;USA",
-                        "URL:https://thunderbird.example/dana"])),
-    ("personal", vcard("Ezra Vance", "Vance", "Ezra", "Mozilla", "",
-                       [("work", "ezra@example.org")], [("cell", "+44 20 7946 0000")])),
-    ("work", vcard("Support Desk", "", "", "Acme", "",
-                   [("work", "support@acme.example")], [("work", "+1 555 0199")])),
-    ("work", vcard("Priya Raman", "Raman", "Priya", "Acme", "Account manager",
-                   [("work", "priya@acme.example")], [("cell", "+1 555 0123")])),
-    ("collected", vcard("noreply@lists.example", "", "", "", "",
-                        [("internet", "noreply@lists.example")])),
-]
-
 BOOKS = [
-    {"id": "personal", "name": "Personal", "type": "addressBook", "readOnly": False, "remote": False},
-    {"id": "work", "name": "Work (CardDAV)", "type": "addressBook", "readOnly": False, "remote": True},
-    {"id": "collected", "name": "Collected Addresses", "type": "addressBook", "readOnly": True, "remote": False},
+    {"id": book["key"], "name": book["name"], "type": "addressBook",
+     "readOnly": book["readOnly"], "remote": book["remote"]}
+    for book in fixture.BOOKS
 ]
 
 
 class Store:
     def __init__(self, empty):
+        self.books = [dict(book) for book in BOOKS]
         self.contacts = {}
         self.ids = itertools.count(1)
         if not empty:
-            for parent, card in SEED:
+            for parent, card in fixture.CONTACTS:
                 self.add(parent, card)
 
     def add(self, parent, card):
@@ -147,7 +111,13 @@ def handle(store, method, params, emit):
     if method == "bridge.ping":
         return {"pong": int(time.time() * 1000)}
     if method == "addressBooks.list":
-        return BOOKS
+        return store.books
+    if method == "addressBooks.create":
+        book = {"id": f"book{len(store.books) + 1}", "name": params["name"],
+                "type": "addressBook", "readOnly": False, "remote": False}
+        store.books.append(book)
+        emit("addressBooks.onCreated", {"addressBook": book})
+        return book["id"]
     if method == "contacts.list":
         return [c for c in store.contacts.values() if c["parentId"] == params.get("parentId")]
     if method == "contacts.quickSearch":

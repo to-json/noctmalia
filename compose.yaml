@@ -30,6 +30,7 @@ services:
       retries: 30
 
   # Local IMAP/SMTP for development and tools/smoke.sh. Accepts any recipient.
+  # The users are tools/fixture.py's accounts; tools/seed.sh exports them.
   greenmail:
     image: greenmail/standalone:2.1.13
     profiles: ["dev"]
@@ -37,7 +38,7 @@ services:
       GREENMAIL_OPTS: >-
         -Dgreenmail.setup.test.smtp -Dgreenmail.setup.test.imap
         -Dgreenmail.hostname=0.0.0.0
-        -Dgreenmail.users=j:secret@noctmalia.test
+        -Dgreenmail.users=${GREENMAIL_USERS:-j:secret@noctmalia.test}
 
 volumes:
   tbd-profile:
