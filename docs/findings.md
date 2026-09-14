@@ -120,6 +120,76 @@ docker compose --profile dev down                    # stop (add -v to wipe)
 - **`items.query({expand: true, rangeStart, rangeEnd})`** returns one entry per recurrence, each with `instance` set.
 - **Snooze and dismiss need no new API.** Write Thunderbird's own iCal properties: `X-MOZ-SNOOZE-TIME:<utc>` snoozes, `X-MOZ-LASTACK:<utc>` dismisses.
 
+### What the profile retains (verified 2026-09-14, TB 155.0.1, this machine)
+
+- **No message bodies exist as files.** All three accounts are
+  `storeContractID=@mozilla.org/msgstore/berkeleystore;1` (mbox) with offline download off, so
+  `ImapMail/greenmail/` holds `INBOX.msf`, `Trash.msf` and `msgFilterRules.dat` and no `INBOX`.
+  The whole profile is 23 MB and none of it is mail. A maildir store would need
+  `mail.serverDefaultStoreContractID` and `mail.server.default.offline_download` set **before the
+  accounts are created**; `dev.provisionAccount` writes the berkeleystore pref per server.
+- **Gloda runs unasked and indexes immediately.** `global-messages-db.sqlite` is live in a default
+  profile with no configuration. Three messages SMTPed into GreenMail were in `messages` within ten
+  seconds of arriving, bodies included.
+- **Thunderbird does the threading.** `messages.conversationID` joins to a `conversations` row
+  (`id, subject, oldestMessageDate, newestMessageDate`). Two replies carrying `References` landed in
+  one conversation under the canonical subject. There is no need for a JWZ implementation — the
+  "no thread API" gap in `docs/design.md` is about the *WebExtension* API, not about Thunderbird.
+- **Body text is retained even with no offline store.** `messagesText_content` is a plain FTS3
+  content table with columns `docid, c0body, c1subject, c2attachmentNames, c3author, c4recipients`,
+  readable by stock SQLite.
+- **But the FTS index is not readable from outside Gecko.** `messagesText` declares the `mozporter`
+  tokenizer, which Gecko registers at runtime; plain `sqlite3` fails any query against it with
+  `unknown tokenizer: mozporter`. Ranked search therefore has to run in-process, i.e. through an
+  Experiment over Gloda's JS API. Metadata and content tables can be read directly, which is useful
+  for fixtures and debugging.
+- **Reaching it from the host needs a second bind mount.** The profile is the named volume
+  `tbd-profile`, and §9 applies: a host process cannot reach a named volume. Thunderbird also holds
+  the database open under WAL. Both are reasons to go through the bridge rather than read the file.
+- Other state, for the record: contacts in `abook.sqlite`, calendar in `calendar-data/local.sqlite`,
+  filters in `msgFilterRules.dat` (a flat file, already present), headers/flags/tags in per-folder
+  Mork `.msf`.
+
+### Building the client on top of it (verified 2026-09-14, TB 155.0.1)
+
+- **Gloda's `NOUN_*` constants are not on `Gloda`.** They moved to
+  `resource:///modules/gloda/GlodaConstants.sys.mjs` in Thunderbird 102, so `Gloda.NOUN_MESSAGE` is
+  `undefined` and `Gloda.newQuery` fails three frames deep as `nounDef is undefined`. Import
+  `GlodaConstants` and use `GlodaConstants.NOUN_MESSAGE`.
+- **`Gloda.newQuery(...).headerMessageID(...ids)` works** and `message.conversation` gives
+  `{id, subject}` — which is the whole threading story, with no JWZ anywhere.
+- **`GlodaMsgSearcher(null, query).buildFulltextQuery()`** runs the ranked full-text search, and
+  `context.extension.messageManager.convert(msgHdr)` turns each hit back into a WebExtension
+  `MessageHeader`, so search results are the same shape as `messages.list`.
+- **A `MessageHeader.subject` has no `Re:` on it.** Thunderbird's message database strips the
+  prefix and keeps it as a flag, so a reply is indexed under the subject it is replying to. Two
+  consequences: threading by subject needs no stripping of its own, and a test that waits for
+  "Re: whatever" to arrive waits forever — follow the `headerMessageId` instead.
+- **`messages.query` needs `autoPaginationTimeout: 0`** or it can sit there paginating rather than
+  answering — a query that returns nothing for sixty seconds is this, not a missing message.
+- **`isPlainText` is decided when the compose window opens, not afterwards.** Passing it to
+  `setComposeDetails` is accepted and does nothing: the editor is already an HTML one, so
+  `plainTextBody` is ignored and the message goes out with whatever `beginReply` quoted into it.
+  Pass the details to `beginReply`/`beginNew` as well.
+- **A compose window is not ready when its promise resolves.** `getComposeDetails` starts answering
+  before the editor can be written to, and a `setComposeDetails` in that gap is accepted silently.
+  Write, read back, and write again until what you asked for is what is there.
+- **`compose.send` and `compose.save` have to be in `permissions`.** In `optional_permissions`,
+  even auto-granted through `ExtensionPermissions.add`, `beginReply` fails with Gecko's generic
+  "An unexpected error occurred".
+- **`nsIMsgFilterList` works headless.** `server.getFilterList(null)` → `createFilter` →
+  `appendTerm`/`appendAction(MoveToFolder)` → `insertFilterAt` → `saveToDefaultFile()` writes
+  `msgFilterRules.dat` and Thunderbird files the next matching message without a restart. A search
+  term reads back as integers, so name them (`Ci.nsMsgSearchAttrib.Sender` → "from") or the rule
+  prints as "1 contains …".
+- **`account.folders` has no unnamed root on an IMAP account**: it is `[Inbox, Trash, …]` directly,
+  and a folder created under the Inbox has the path `/INBOX/Screened`. Code that walks a path from
+  the account root must not assume a root folder entry, and `folderManager.get(folderId)` is worth
+  trying first.
+- **Gecko replaces the message of anything thrown inside a WebExtension API** with "An unexpected
+  error occurred". The first line of `error.stack` is usually the only thing left that says where,
+  which is why `errorInfo` appends it.
+
 ### Test infrastructure quirks
 - **GreenMail** (`greenmail/standalone:2.1.13`, multi-arch): users are `login:password@domain`, mail is in-memory, any recipient is accepted.
   - It does **not** add a `Message-ID` to injected mail; Thunderbird then synthesizes an `md5:…` id and replies carry no threading headers. Always set `Message-ID` when injecting.
@@ -139,9 +209,10 @@ docker compose --profile dev down                    # stop (add -v to wipe)
 | Mail: send new | plain/HTML, attachments, sendNow/sendLater | official `messages.sendMessage` | ✅ |
 | Mail: reply / forward | threading headers, quoting | official compose API (`beginReply`/`beginForward` → `setComposeDetails` → `compose.sendMessage`) | ✅ correct `In-Reply-To`/`References` |
 | Mail: drafts | save / edit | official `compose.saveMessage` | ✅ save · ❓ reopen existing draft |
+| Mail: screening | list and create message filters | ours, `filters.*` over `nsIMsgFilterList` | ✅ created, saved, and applied to arriving mail |
 | Mail: encrypt/sign | PGP, S/MIME | official compose (`selectedEncryptionTechnology`) | ❓ needs keys |
-| Mail: threads | conversation tree | ours, over TB's thread view / msgDB | ❌ not built |
-| Mail: search | fast full-text | official (slow scan) · Gloda via ours | ⚠️ slow path only |
+| Mail: threads | conversation tree | ours, `gloda.conversations` over Gloda | ✅ `conversationID` from Gloda; no threader of our own |
+| Mail: search | fast full-text | ours, `gloda.search` over `GlodaMsgSearcher` | ✅ ranked, every indexed folder |
 | Mail: accounts | create/edit/delete, OAuth, check now | ours | ✅ password IMAP/SMTP, check now · ❌ OAuth, edit, delete |
 | Mail: filters, saved searches, IMAP subscriptions, junk/retention settings, undo, remote-content allowlist, read receipts | — | ours | ❌ not built |
 | Contacts | books, vCard CRUD, search/autocomplete, mailing lists | official | ✅ exposed on the bridge and driven by the UI · ❓ field read-back against real Thunderbird still unverified (only against `fake-bridge.py`) |

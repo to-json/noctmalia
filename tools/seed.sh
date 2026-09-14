@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Boot a real headless Thunderbird and put the development fixture in it.
 #
-#   tools/seed.sh              # bring the stack up, wait for the bridge, seed accounts + contacts
-#   tools/seed.sh --reset      # ...replacing fixture contacts that are already there
+#   tools/seed.sh              # bring the stack up, wait for the bridge, seed accounts, contacts, mail
+#   tools/seed.sh --reset      # ...replacing what is already there
+#   tools/seed.sh --mail       # only the mail corpus
+#   tools/seed.sh --flood 500  # ...plus 500 unremarkable messages, for a folder worth windowing
 #
 # Keeps the profile: run it as often as you like. To wipe and start over, `docker compose down -v`.
 #

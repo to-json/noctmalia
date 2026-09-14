@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # End-to-end check of tbd against GreenMail, run from a fresh stack:
 # bridge handshake, account provisioning, headless IMAP fetch and onNewMailReceived,
-# SMTP send through Thunderbird, calendar round trip.
+# SMTP send through Thunderbird, Gloda threading and search, a reply that threads,
+# a message filter, and a calendar round trip.
 # Wipes the compose volumes (the Thunderbird profile included).
+#
+# The Gloda and filter steps ride Thunderbird internals rather than the WebExtension API
+# (docs/mail-plan.md risk 4), so they are the ones to run on every Thunderbird bump.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -20,6 +24,9 @@ import smtplib, sys
 from email.message import EmailMessage
 m = EmailMessage()
 m["From"], m["To"], m["Subject"] = "Alice <alice@example.com>", "j@noctmalia.test", sys.argv[1]
+# A Message-ID, because a reply can only thread on one that exists: without it Thunderbird
+# synthesises `md5:...` for its own index and writes no In-Reply-To at all.
+m["Message-ID"] = "<%s@smoke.example>" % sys.argv[1].replace(" ", "-")
 m.set_content("hello from greenmail")
 with smtplib.SMTP("greenmail", 3025) as s:
     s.send_message(m)
@@ -84,6 +91,104 @@ step "flags + events"
 SEQ=$(ctl status | py 'print(d["seq"])')
 ctl call messages.update "{\"messageIds\":[$MESSAGE],\"properties\":{\"read\":true,\"flagged\":true}}" >/dev/null
 ctl wait messages.onUpdated --after "$SEQ" --timeout 30 | py 'print("onUpdated:", d["data"]["changed"])' || fail "no onUpdated"
+
+step "Gloda: the conversation Thunderbird put it in"
+MSGID=$(ctl call messages.get "{\"messageId\":$MESSAGE}" | py 'print(d["headerMessageId"])')
+echo "headerMessageId $MSGID"
+# Gloda indexes asynchronously — a message is listable before it is searchable.
+CONVERSATION=""
+for _ in $(seq 1 20); do
+  CONVERSATION=$(ctl call gloda.conversations "{\"headerMessageIds\":[\"$MSGID\"]}" 2>/dev/null || echo "[]")
+  if echo "$CONVERSATION" | py 'sys.exit(0 if d else 1)'; then break; fi
+  sleep 3
+done
+echo "$CONVERSATION" | py 'sys.exit(0 if d and d[0]["messages"] else 1)' \
+  || fail "Gloda never put the message in a conversation — its schema may have moved"
+echo "$CONVERSATION" | py 'print("conversation %s: %s" % (d[0]["id"], d[0]["subject"]))'
+
+step "Gloda: ranked full-text search over the body"
+FOUND=""
+for _ in $(seq 1 10); do
+  FOUND=$(ctl call gloda.search '{"query":"greenmail","limit":10}' 2>/dev/null || echo "[]")
+  if echo "$FOUND" | py 'sys.exit(0 if d else 1)'; then break; fi
+  sleep 3
+done
+echo "$FOUND" | py 'print("search hits:", [m["subject"] for m in d]); sys.exit(0 if d else 1)' \
+  || fail "Gloda full-text search returned nothing for a word in the body"
+
+step "reply that threads"
+# Thunderbird's message database strips the `Re:` off a subject and keeps it as a flag, so the
+# reply does not arrive under the subject it was sent with. Follow its Message-ID instead.
+REPLY_ID=$(ctl call compose.reply "{
+  \"messageId\": $MESSAGE, \"type\": \"replyToSender\", \"mode\": \"sendNow\",
+  \"details\": {\"identityId\": \"$IDENTITY\", \"to\": [\"j@noctmalia.test\"],
+                \"subject\": \"Re: smoke inbound\",
+                \"plainTextBody\": \"a **markdown** reply\", \"isPlainText\": true}
+}" --timeout 180 | py 'print(d["headerMessageId"])') || fail "compose.reply failed"
+echo "reply $REPLY_ID"
+
+SENT=$(ctl call messages.query "{\"headerMessageId\":\"$REPLY_ID\",\"autoPaginationTimeout\":0}" \
+  | py 'print(d["messages"][0]["id"] if d["messages"] else "")')
+[ -n "$SENT" ] || fail "the sent copy is nowhere"
+ctl call messages.getFull "{\"messageId\":$SENT}" | python3 -c '
+import json, sys
+message = json.load(sys.stdin)
+headers = {name.lower(): value for name, value in (message.get("headers") or {}).items()}
+threading = " ".join(headers.get("in-reply-to", []) + headers.get("references", []))
+# The root part of getFull is the message/rfc822 wrapper; the body is the part under it.
+body = (message.get("parts") or [{}])[0]
+print("threads on:", threading or "(nothing)")
+print("sent as:", body.get("contentType"))
+print("body:", (body.get("body") or "").strip()[:60])
+sys.exit(0 if sys.argv[1] in threading and "text/plain" in (body.get("contentType") or "") else 1)
+' "$MSGID" || fail "the reply does not thread, or did not go out as plain text"
+
+for _ in $(seq 1 12); do
+  ctl call mail.checkNow "{\"accountId\":\"$ACCOUNT\"}" >/dev/null
+  ARRIVED=$(ctl call messages.query "{\"headerMessageId\":\"$REPLY_ID\",\"autoPaginationTimeout\":0}" \
+    | py 'print(" ".join(m["folder"]["path"] for m in d["messages"]))')
+  case "$ARRIVED" in *INBOX*) break ;; esac
+  sleep 5
+done
+case "$ARRIVED" in
+  *INBOX*) echo "the reply came back round: $ARRIVED" ;;
+  *) fail "the reply never arrived (found in: ${ARRIVED:-nowhere})" ;;
+esac
+
+step "a rule Thunderbird keeps"
+ROOT=$(ctl call accounts.get "{\"accountId\":\"$ACCOUNT\",\"includeSubFolders\":true}" | py 'print(d["folders"][0]["id"])')
+# `accounts.get(...).folders` on an IMAP account has no unnamed root: it is [Inbox, Trash, ...],
+# so a folder created under folders[0] lands inside the Inbox. Take the path it reports.
+MADE=$(ctl call folders.create "{\"parentId\":\"$ROOT\",\"name\":\"Screened\"}")
+SCREENED=$(echo "$MADE" | py 'print(d["id"] if isinstance(d, dict) else d)')
+SCREENED_PATH=$(echo "$MADE" | py 'print(d.get("path", "") if isinstance(d, dict) else "")')
+echo "screened $SCREENED at $SCREENED_PATH"
+ctl call filters.create "{\"accountId\":\"$ACCOUNT\",\"name\":\"smoke rule\",\"header\":\"from\",
+  \"value\":\"alice@example.com\",\"folderId\":\"$SCREENED\",\"folderPath\":\"$SCREENED_PATH\"}" \
+  | py 'print("rule:", d["name"])' || fail "filters.create failed"
+ctl call filters.list "{\"accountId\":\"$ACCOUNT\"}" \
+  | py 'print("rules:", [(r["name"], r["summary"]) for r in d]); sys.exit(0 if any(r["name"]=="smoke rule" for r in d) else 1)' \
+  || fail "the rule is not in the filter list"
+if dc exec -T tbd sh -c 'cat /data/profile/ImapMail/*/msgFilterRules.dat 2>/dev/null' | grep -q "smoke rule"; then
+  echo "and it is in msgFilterRules.dat, which is where it lives"
+else
+  fail "the rule is not in msgFilterRules.dat"
+fi
+
+step "and the rule files the next message that matches"
+inject_mail "smoke screened"
+FILED=""
+for _ in $(seq 1 12); do
+  ctl call mail.checkNow "{\"accountId\":\"$ACCOUNT\"}" >/dev/null
+  FILED=$(ctl call messages.query '{"subject":"smoke screened","autoPaginationTimeout":0}' \
+    | py 'print(" ".join(m["folder"]["path"] for m in d["messages"]))')
+  case "$FILED" in *Screened*) break ;; esac
+  sleep 5
+done
+case "$FILED" in
+  *Screened*) echo "filed into $FILED without anybody touching it" ;;
+  *) fail "the rule did not file the message (it is in: ${FILED:-nowhere})" ;;
+esac
 
 step "calendar round trip"
 CAL=$(ctl call calendar.calendars.create '{"type":"storage","url":"moz-storage-calendar://","name":"smoke"}' | py 'print(d["id"])')

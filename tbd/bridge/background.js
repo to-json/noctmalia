@@ -21,7 +21,20 @@ function emit(event, data) {
 }
 
 function errorInfo(error) {
-  return { name: error?.name ?? "Error", message: String(error?.message ?? error) };
+  // Gecko replaces the message of anything thrown inside a WebExtension API with "An unexpected
+  // error occurred", so the top of the stack is often the only thing that says where it happened.
+  const where = String(error?.stack ?? "").split("\n")[0];
+  const message = String(error?.message ?? error);
+  return { name: error?.name ?? "Error", message: where ? `${message} @ ${where}` : message };
+}
+
+// Names the step that failed, which an API error otherwise will not.
+async function attempt(what, action) {
+  try {
+    return await action();
+  } catch (error) {
+    throw new Error(`${what}: ${error?.message ?? error}`);
+  }
 }
 
 // Binary payloads cross the bridge as base64.
@@ -63,6 +76,70 @@ async function info() {
 }
 
 const { calendar } = messenger;
+
+// Composing goes through a compose tab even though there is a windowless messages.send, because
+// only compose.beginReply sets In-Reply-To and References — and a reply that does not thread shows
+// up in the wrong place in everybody else's mail client. spike/boundary-probe is where that was
+// established. The tab closes itself once the message is sent or saved.
+//
+// Two things the API does not say and a headless Thunderbird will not forgive.
+//
+// **`isPlainText` is decided when the window opens, not afterwards.** `setComposeDetails` accepts
+// it and does nothing: the editor is already an HTML one, so `plainTextBody` is ignored and the
+// message goes out as whatever `beginReply` quoted into it. So the details are passed to
+// `beginReply`/`beginNew` as well, where the mode is still a choice.
+//
+// **The window is not ready when the promise resolves.** `getComposeDetails` starts answering
+// before the editor inside it can be written to, and a `setComposeDetails` that lands in that gap
+// is accepted and silently does nothing. Hence `apply`, which writes, reads back, and writes again
+// until what it asked for is what is there.
+const sleep = (ms) => new Promise((wake) => setTimeout(wake, ms));
+
+// Writes the details into the compose window and checks they took.
+//
+// `getComposeDetails` starts answering before the editor inside the window is ready to be written
+// to, and a `setComposeDetails` that lands in that gap is accepted and silently does nothing — the
+// message goes out with whatever `beginReply` quoted into it instead of what was typed. So this
+// writes, reads back, and writes again until the body it asked for is the body that is there.
+async function apply(tab, details) {
+  const wanted = (details.plainTextBody ?? details.body ?? "").slice(0, 40);
+  let last = null;
+  let why = "";
+  for (let attempt = 0; attempt < 40; attempt++) {
+    try {
+      await messenger.compose.setComposeDetails(tab.id, details);
+      last = await messenger.compose.getComposeDetails(tab.id);
+      const got = `${last.plainTextBody ?? ""}${last.body ?? ""}`;
+      if (!wanted || got.includes(wanted)) {
+        return last;
+      }
+    } catch (error) {
+      why = String(error?.message ?? error);
+    }
+    await sleep(250);
+  }
+  const got = `${last?.plainTextBody ?? ""}${last?.body ?? ""}`.slice(0, 120).replace(/\s+/g, " ");
+  throw new Error(
+    `the compose window would not take the details (isPlainText ${last?.isPlainText}, ` +
+      `wanted ${JSON.stringify(wanted)}, got ${JSON.stringify(got)}${why ? `, last error ${why}` : ""})`
+  );
+}
+
+async function deliver(tab, details, mode) {
+  await attempt("setComposeDetails", () => apply(tab, details));
+  if (mode === "draft" || mode === "template") {
+    return attempt("saveMessage", () => messenger.compose.saveMessage(tab.id, { mode }));
+  }
+  return attempt("sendMessage", () => messenger.compose.sendMessage(tab.id, { mode }));
+}
+
+const REPLY_TYPES = {
+  replyToSender: "reply",
+  replyToAll: "reply",
+  replyToList: "reply",
+  forwardInline: "forward",
+  forwardAsAttachment: "forward",
+};
 
 const methods = {
   "bridge.ping": async () => ({ pong: Date.now() }),
@@ -108,6 +185,28 @@ const methods = {
   "messages.import": ({ folderId, base64, properties }) =>
     messenger.messages.import(base64ToFile(base64, "message.eml", "message/rfc822"), folderId, properties),
   "messages.send": ({ details, mode = "sendNow" }) => messenger.messages.sendMessage(details, { mode }),
+
+  "compose.begin": async ({ details, mode = "sendNow" }) =>
+    deliver(await attempt("beginNew", () => messenger.compose.beginNew(null, details)), details, mode),
+  "compose.reply": async ({ messageId, type = "replyToSender", details, mode = "sendNow" }) => {
+    const kind = REPLY_TYPES[type];
+    if (!kind) {
+      throw new Error(`unknown reply type: ${type}`);
+    }
+    const tab = await attempt(kind === "reply" ? "beginReply" : "beginForward", () =>
+      kind === "reply"
+        ? messenger.compose.beginReply(messageId, type, details)
+        : messenger.compose.beginForward(messageId, type, details)
+    );
+    return deliver(tab, details, mode);
+  },
+
+  // Threading and search are Thunderbird's own index; see experiments/noctmalia/parent.js.
+  "gloda.conversations": ({ headerMessageIds }) => messenger.noctmalia.glodaConversations(headerMessageIds),
+  "gloda.search": ({ query, limit }) => messenger.noctmalia.glodaSearch(query, limit),
+
+  "filters.list": ({ accountId }) => messenger.noctmalia.filtersList(accountId),
+  "filters.create": (options) => messenger.noctmalia.filtersCreate(options),
 
   "tags.list": () => messenger.messages.tags.list(),
   "tags.create": ({ key, tag, color }) => messenger.messages.tags.create(key, tag, color),

@@ -62,7 +62,11 @@ On the socket, each message is one JSON object per line. The shim converts to an
 - **Contacts are vCards.** MV2 puts the vCard under `properties`; the bridge lifts it to `vCard` on
   every contact it returns, so clients read one field either way. Anything a client does not
   understand (`UID`, `REV`, `X-`) must be written back unchanged or Thunderbird loses it.
-- **Message ids** (`MessageId`) are per session. Key durable state on `headerMessageId` plus folder.
+- **Message ids** (`MessageId`) are per session, and belong to wherever the message currently is —
+  moving a message does not carry its id along. Key durable state on `headerMessageId` plus folder.
+- **A `MessageHeader.subject` has no `Re:` on it.** Thunderbird's database strips the prefix and
+  keeps it as a flag, so a reply is indexed under the subject it is replying to.
+- **`messages.query` wants `autoPaginationTimeout: 0`** unless you are prepared to page it.
 
 ### Methods
 
@@ -74,6 +78,9 @@ Parameters are named. Each method maps to the `messenger.*` call of the same nam
 | accounts | `accounts.list {includeSubFolders}`, `accounts.get {accountId}`, `identities.list {accountId}` |
 | folders | `query`, `get`, `getSubFolders`, `getFolderInfo`, `getFolderCapabilities`, `create {parentId,name}`, `rename`, `delete`, `markAsRead` — all take `{folderId}` |
 | messages | `list {folderId,sortType,sortOrder}` → `{id,messages}`; `continueList {listId}`; `abortList`; `query`; `get`/`getFull`/`getRaw`/`listAttachments {messageId}`; `getAttachment {messageId,partName}`; `update {messageIds,properties}`; `move`/`copy {messageIds,folderId}`; `delete {messageIds,deletePermanently}`; `archive {messageIds}`; `import {folderId,base64}`; `send {details,mode}` |
+| compose | `compose.begin {details,mode}`, `compose.reply {messageId,type,details,mode}` — `type` is `replyToSender`/`replyToAll`/`replyToList`/`forwardInline`/`forwardAsAttachment`, `mode` is `sendNow`/`draft`/`template`. Only these set `In-Reply-To`/`References`; windowless `messages.send` does not thread and is for new mail only. |
+| gloda | `gloda.conversations {headerMessageIds}` → `[{id,subject,messages}]`; `gloda.search {query,limit}` → `MessageHeader[]`. Thunderbird's own threading and ranked full-text index — neither is reachable from outside this process. |
+| filters | `filters.list {accountId}` → `[{name,enabled,summary}]`; `filters.create {accountId,name,header,value,folderId,folderPath}` — `header` is `from`/`to`/`subject`/`list-id`. Writes `msgFilterRules.dat`. |
 | tags | `tags.list`, `tags.create {key,tag,color}`, `tags.update {key,updateProperties}`, `tags.delete {key}` |
 | addressBooks | `addressBooks.list {complete}`, `get {addressBookId,complete}`, `create {name}`, `update {addressBookId,name}`, `delete {addressBookId}` |
 | contacts | `contacts.list {parentId}`, `quickSearch {searchString,parentId?}`, `get {contactId}`, `create {parentId,vCard}` → id, `update {contactId,vCard}`, `delete {contactId}`, `getPhoto {contactId}` → `{base64,type}`, `setPhoto {contactId,base64,type}` |
@@ -98,3 +105,8 @@ Parameters are named. Each method maps to the `messenger.*` call of the same nam
 ## Vendored code
 
 `bridge/experiments/calendar` is an unmodified copy of the thunderbird/webext-experiments calendar Experiment; the pinned commit is in `UPSTREAM`. On every Thunderbird version bump, re-vendor it and rerun `tools/smoke.sh`.
+
+`bridge/experiments/noctmalia` is ours, and rides Thunderbird internals that have no API:
+`nsIMsgAccountManager` for provisioning, Gloda for threading and search, `nsIMsgFilterList` for
+rules. Internals move on version bumps, which is why `tools/smoke.sh` exercises all three — it is
+the thing to run before believing a new Thunderbird.

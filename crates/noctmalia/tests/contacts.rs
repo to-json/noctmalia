@@ -181,7 +181,9 @@ async fn an_edit_keeps_the_properties_thunderbird_owns() {
 async fn an_unimplemented_method_surfaces_as_an_error_not_a_hang() {
     let Some((bridge, _books, _fake, _socket)) = attached("unknown").await else { return };
 
-    let result = bridge.call_raw("messages.list", serde_json::json!({ "folderId": "x" })).await;
-    let error = result.expect_err("the fake bridge serves contacts only");
+    // Snooze is cut on purpose (docs/mail-plan.md §7), so nothing anywhere implements it — which
+    // makes it a durable stand-in for "a method the other end has never heard of".
+    let result = bridge.call_raw("messages.snooze", serde_json::json!({ "messageId": 1 })).await;
+    let error = result.expect_err("no bridge implements a method nobody wrote");
     assert!(error.to_string().contains("MethodNotFound"), "{error}");
 }

@@ -24,6 +24,37 @@
         "parameters": [{ "name": "config", "type": "object", "additionalProperties": { "type": "any" } }]
       },
       {
+        "name": "glodaConversations",
+        "type": "function",
+        "async": true,
+        "description": "Which conversation Thunderbird has put each headerMessageId in. Threading is Gloda's, not ours.",
+        "parameters": [{ "name": "headerMessageIds", "type": "array", "items": { "type": "string" } }]
+      },
+      {
+        "name": "glodaSearch",
+        "type": "function",
+        "async": true,
+        "description": "Gloda's ranked full-text search across every indexed folder. Returns MessageHeaders.",
+        "parameters": [
+          { "name": "query", "type": "string" },
+          { "name": "limit", "type": "integer", "optional": true }
+        ]
+      },
+      {
+        "name": "filtersList",
+        "type": "function",
+        "async": true,
+        "description": "The account's own message filters, from msgFilterRules.dat.",
+        "parameters": [{ "name": "accountId", "type": "string" }]
+      },
+      {
+        "name": "filtersCreate",
+        "type": "function",
+        "async": true,
+        "description": "Adds a filter that moves matching mail to a folder, and saves the list.",
+        "parameters": [{ "name": "options", "type": "object", "additionalProperties": { "type": "any" } }]
+      },
+      {
         "name": "devEval",
         "type": "function",
         "async": true,
