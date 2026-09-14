@@ -253,10 +253,27 @@ wanted — the app window, the frame, theming, scroll views, text inputs — out
 ## 8. Open questions and next steps
 
 **Done since this file was written:** the mailnd/hub decision (§2), the bridge's contacts surface,
-and a working contacts UI (`crates/noctmalia`) with tests. What it has never been run against is a
-real Thunderbird — only `tools/fake-bridge.py`. That is the next thing to do, and it needs Docker.
+a working contacts UI (`crates/noctmalia`) with tests, and — 2026-09-13 — the first run against a
+real headless Thunderbird, via `tools/seed.sh`.
 
-1. **Run the rolodex against tbd.** `docker compose -f compose.yaml -f compose.ui.yaml up -d --build tbd`, then `cargo run -p noctmalia`. Watch for: `readOnly`/`remote` flags on the real books, whether `contacts.quickSearch` takes `(parentId, searchString)` or just the string on TB 155, and whether Thunderbird preserves `UID`/`X-` round-tripped through `contacts.update`.
+### Answered against Thunderbird 155.0.1 (2026-09-13)
+
+- **`contacts.quickSearch` takes either shape.** `{parentId, searchString}` and `{searchString}`
+  alone both return the same hit. The bridge's conditional is belt and braces, not a requirement.
+- **`UID` and `X-` survive `contacts.update`.** A card read back after an edited write still carried
+  `UID:urn:uuid:alice-0001` and `X-THUNDERBIRD-KEEP:round-tripped` — so the vCard `rest` round trip
+  is doing real work, and dropping it would silently destroy Thunderbird's own identifiers.
+- **The real book flags are all false.** Thunderbird's own `Personal Address Book` and
+  `Collected Addresses`, and a book we created, all report `readOnly=false remote=false type=addressBook`
+  with uuid ids. **Collected Addresses is *not* read-only** — `tools/fixture.py` marks it read-only
+  for the stand-in only, to exercise the badge. Nothing in a default profile exercises those flags;
+  a CardDAV book is needed for `remote`, which needs a real provider (item 2).
+- **Address books match by name.** Seeding lands in Thunderbird's two default books rather than
+  creating duplicates, which is why the fixture uses their exact names.
+- **Two IMAP accounts provision cleanly** through `dev.provisionAccount` (`account2`/`account3`,
+  identities `id1`/`id2`), alongside the `Local Folders` account TB makes for itself.
+
+1. **Run the rolodex UI against tbd.** The data path is confirmed; the UI has still only been driven against `tools/fake-bridge.py`. `tools/seed.sh` first, then hand the socket over: `docker compose -f compose.yaml -f compose.ui.yaml up -d tbd`, then `scripts/run.sh`. Only one client may hold the socket, so the CLI stub and the UI cannot both be attached.
 2. **Real account.** A throwaway Gmail covers what GreenMail can't: OAuth, Gmail labels, SMTP with OAuth, Google CalDAV/CardDAV. Bootstrap via `TBD_MODE=gui` on the Wayland machine (written, untested), or sign in with any TB 155 and copy the profile into the `tbd-profile` volume. I can't create provider accounts; they need phone or CAPTCHA verification.
 3. **Automatable real-ish server:** Stalwart in compose, for IMAP/SMTP/JMAP and probably CalDAV/CardDAV/OAuth. **Verify its feature list first.**
 4. **Untested rows in §6:** encryption (needs keys), reopening drafts, move/delete/archive, contact field read-back, CalDAV subscription, reply-subject query quirk.

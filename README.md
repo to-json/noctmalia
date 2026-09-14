@@ -96,8 +96,10 @@ noctalia-iced used to hardcode one palette. Both now come from the system.
 ## Status
 
 - **Verified by running it:** the transport (reconnect, out-of-order replies, in-flight failure on
-  disconnect, the 1 MiB cap), vCard round-tripping, and contacts list/search/create/update/delete —
-  the last against `tools/fake-bridge.py`, not against Thunderbird itself.
-- **Not yet run against a real Thunderbird.** That is the next step, and the one most likely to turn
-  up surprises: `docs/findings.md` §8 lists what to watch for. `tools/seed.sh` is written and its
-  logic is tested against the stand-ins, but no container has been started on this machine.
+  disconnect, the 1 MiB cap), vCard round-tripping, and contacts list/search/create/update/delete.
+- **Runs against a real Thunderbird** (155.0.1 headless, 2026-09-13): `tools/seed.sh` provisions two
+  IMAP accounts and writes the fixture into the profile, and the rolodex lists all seven contacts
+  out of Thunderbird's own address books. `UID` and `X-` properties survive an edit round trip, and
+  `contacts.quickSearch` accepts either argument shape — `docs/findings.md` §8 has the details.
+- **Still untested:** everything mail. The read path is the next surface, and postal-address editing
+  is the gap in the contact editor.
