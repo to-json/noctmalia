@@ -1,12 +1,12 @@
-# noctmalia — a Noctalia-native rolodex, with Thunderbird headless in a container behind it.
+# noctmalia — a Noctalia-native mail and contacts window, with Thunderbird headless behind it.
 #
-#   just              Thunderbird up, then the rolodex against it. The whole thing, from cold.
-#   just fake         the rolodex against a stand-in: no Docker, no Thunderbird, the same people.
+#   just              Thunderbird up, then the window against it. The whole thing, from cold.
+#   just fake         the window against a stand-in: no Docker, no Thunderbird, the same mail.
 #   just --list       everything else.
 #
 # Two things worth knowing, both handled here so nobody has to remember them:
 #
-#  - Only one client may hold the bridge socket, so opening the rolodex closes any other one first.
+#  - Only one client may hold the bridge socket, so opening the window closes any other one first.
 #  - Docker group membership is not live in a shell that was already open, so anything touching
 #    Docker goes through scripts/with-docker.sh.
 
@@ -18,7 +18,7 @@ compose := "docker compose -f compose.yaml -f compose.ui.yaml"
 
 default: run
 
-# Thunderbird up, then the rolodex against it.
+# Thunderbird up, then the window against it.
 run: up
     #!/usr/bin/env bash
     set -euo pipefail
@@ -44,12 +44,12 @@ run: up
     fi
     wait "$ui"
 
-# The rolodex on its own, against a Thunderbird that is already up.
+# The window on its own, against a Thunderbird that is already up.
 ui:
     @just _quit
     scripts/run.sh --chrome
 
-# The rolodex against tools/fake-bridge.py. Nothing else has to be running.
+# The window against tools/fake-bridge.py. Nothing else has to be running.
 fake *args:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -79,6 +79,22 @@ seed *args:
     # Seeding drives the bridge through the CLI stub, so hand the socket back with `just run`.
     scripts/with-docker.sh tools/seed.sh {{ args }}
 
+# Just the mail corpus, written straight into folders with `messages.import` — no SMTP, no waiting.
+mail *args:
+    scripts/with-docker.sh tools/seed.sh --mail {{ args }}
+
+# A folder worth windowing: `just flood` for 500 unremarkable messages, `just flood 5000` for more.
+flood count="500":
+    scripts/with-docker.sh tools/seed.sh --flood {{ count }}
+
+# Pictures of every surface, drawn headlessly. Look at them; they assert nothing.
+shots:
+    scripts/cargo.sh test -p noctmalia --test shots -- --ignored --nocapture
+
+# The mail corpus as .eml files, for reading with something else.
+eml directory="target/eml":
+    tools/fixture.py eml {{ directory }}
+
 # Throw the Thunderbird profile away. The next `just seed` starts from nothing.
 reset:
     scripts/with-docker.sh {{ compose }} down -v
@@ -92,18 +108,18 @@ status:
       || echo "  none up"
     sock="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/noctmalia/bridge.sock"
     echo "bridge socket"
-    if [ -S "$sock" ]; then echo "  bound at $sock"; else echo "  not bound — the rolodex is not running"; fi
-    echo "rolodex"
+    if [ -S "$sock" ]; then echo "  bound at $sock"; else echo "  not bound — noctmalia is not running"; fi
+    echo "noctmalia"
     pid=$(pgrep -x noctmalia | paste -sd' ' -)
     if [ -n "$pid" ]; then echo "  running (pid $pid)"; else echo "  not running"; fi
 
-# Close a running rolodex, so the next one can have the socket.
+# Close a running window, so the next one can have the socket.
 [private]
 _quit:
     pkill -x noctmalia >/dev/null 2>&1 || true
     sleep 0.4
 
-# Ask Noctalia to render its palette where the rolodex can read it. Once per machine.
+# Ask Noctalia to render its palette where the window can read it. Once per machine.
 palette:
     scripts/cargo.sh run -q -p noctmalia --bin noctmalia -- --install-palette-template
 

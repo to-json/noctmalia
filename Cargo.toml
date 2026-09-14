@@ -12,7 +12,9 @@ rust-version = "1.88"
 noctmalia-bridge = { path = "crates/noctmalia-bridge" }
 # The UI toolkit lives in its own repository next to this one.
 noctalia-iced = { path = "../noctalia-iced/crates/noctalia-iced" }
-iced = { version = "0.14", features = ["canvas", "advanced", "tokio"] }
+iced = { version = "0.14", features = ["canvas", "advanced", "tokio", "markdown"] }
+# Dates: a message list is mostly relative times, and "yesterday" needs the local zone.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt", "net", "sync", "io-util", "macros", "time"] }

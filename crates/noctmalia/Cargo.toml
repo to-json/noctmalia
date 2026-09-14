@@ -21,6 +21,7 @@ path = "src/main.rs"
 
 [dependencies]
 noctmalia-bridge.workspace = true
+chrono.workspace = true
 noctalia-iced.workspace = true
 iced.workspace = true
 serde.workspace = true
@@ -29,3 +30,7 @@ tokio.workspace = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+# Lays the real widget tree out headlessly, so a claim about what is on screen can be checked
+# against what is on screen.
+iced_test = "0.14"
+iced_selector = "0.14"

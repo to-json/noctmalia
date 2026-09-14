@@ -5,9 +5,17 @@
 > Rust on iced**, built on the sibling repository `../noctalia-iced`, not the C++ toolkit. The
 > product direction, the principles and the hard problems all still stand; the imagined C++ API
 > sketches are kept only as a record of the shape that was wanted.
+>
+> **2026-09-14: the mail half of this document is superseded by `docs/mail-plan.md`, which was
+> built.** Three answers here turned out to be wrong rather than merely unfinished. There is no
+> HTML engine and there will not be one: every letter becomes Markdown (mail-plan §1). There is no
+> threader and no search index of ours: Thunderbird has both, in Gloda, and has all along
+> (mail-plan §2, §3). And mail is not a directory of files, because Thunderbird keeps no bodies as
+> files to make a directory out of — `findings.md` "What the profile retains" is the measurement
+> that settled it.
 
-Status: the transport, the contacts surface and a contacts UI exist and are tested (against a fake
-Thunderbird, not a real one). Mail and calendar are still design.
+Status: the transport, contacts and **mail** exist and are tested against a real headless
+Thunderbird (`tools/smoke.sh`). Calendar is still design.
 
 ## Verified in a container (2026-09-13)
 

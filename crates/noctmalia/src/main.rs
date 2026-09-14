@@ -5,7 +5,7 @@
 //! socket's directory into it (`docs/findings.md` §9).
 
 use noctalia_iced::{chrome, theme};
-use noctmalia::app::{self, Rolodex};
+use noctmalia::app::{self, App};
 use noctmalia::{font, palette};
 use noctmalia_bridge::Bridge;
 use std::path::PathBuf;
@@ -115,14 +115,14 @@ fn main() -> ExitCode {
     }
 
     let window = chrome::settings(app::WINDOW, app::WINDOW_MIN, APP_ID);
-    let application = iced::application(move || Rolodex::new(bridge.clone()), Rolodex::update, Rolodex::view)
-        .title(Rolodex::title)
-        .theme(Rolodex::theme)
+    let application = iced::application(move || App::new(bridge.clone()), App::update, App::view)
+        .title(App::title)
+        .theme(App::theme)
         .style(|_, _| iced::theme::Style {
             background_color: chrome::background(),
             text_color: theme::palette().on_surface,
         })
-        .subscription(Rolodex::subscription)
+        .subscription(App::subscription)
         .font(theme::ICON_FONT_BYTES)
         .window(window)
         .default_font(font::ui());

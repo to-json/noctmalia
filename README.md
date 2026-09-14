@@ -4,7 +4,9 @@ A mail, calendar and contacts client that looks native on a [Noctalia](https://g
 desktop, with **Thunderbird as the backend**. Thunderbird runs headless in a container and keeps
 doing accounts, protocols, storage, sync and sending. We replace only the UI.
 
-Today that UI is a **contacts rolodex**. Mail is next; see `docs/design.md`.
+Today it is **mail and contacts**, two surfaces of one window — only one client may hold the bridge
+socket, so they cannot be two programs. `docs/mail-plan.md` is why the mail surface is shaped the
+way it is.
 
 ```
 thunderbird --headless ── bridge (MailExtension) ── nm-shim ──►  noctmalia
@@ -16,28 +18,35 @@ thunderbird --headless ── bridge (MailExtension) ── nm-shim ──►  n
 |---|---|
 | `flake.nix`, `scripts/` | The devshell, and the cargo/run wrappers around it |
 | `crates/noctmalia-bridge` | The protocol: binds the socket, matches replies by id, streams events |
-| `crates/noctmalia` | The app: vCard parsing, contacts calls, theme/font, the rolodex window |
+| `crates/noctmalia` | The app: MIME and Markdown, mail and contacts calls, vCards, theme/font, the window |
 | `tbd/` | The Thunderbird container and the bridge extension. Protocol reference: `tbd/README.md` |
-| `tools/` | `fixture.py` (the test data), `seed.sh`/`seed.py` (put it in a real profile), `fake-bridge.py` (a Thunderbird stand-in), `bridgectl.py` + `mailnd-stub.py` (a CLI path), `smoke.sh` |
+| `tools/` | `fixture.py` (the test data, mail included), `seed.sh`/`seed.py` (put it in a real profile), `fake-bridge.py` (a Thunderbird stand-in), `bridgectl.py` + `mailnd-stub.py` (a CLI path), `smoke.sh` |
 | `docs/findings.md` | What has actually been verified, and the gotchas behind it |
 | `docs/design.md` | Where this is going |
+| `docs/mail-plan.md` | The mail surface: the decisions, the milestones, and what building them changed |
 
 ## Running it
 
 ```sh
-just                  # Thunderbird up, then the rolodex against it
-just fake             # the rolodex against a stand-in: no Docker, no Thunderbird
+just                  # Thunderbird up, then the window against it
+just fake             # the window against a stand-in: no Docker, no Thunderbird
 just status           # what is up, and whether the bridge has a Thunderbird on the other end
-just seed --reset     # put the development fixture into a real profile
+just seed --reset     # put the development fixture — accounts, contacts and mail — into a real profile
+just flood 500        # 500 more unremarkable messages, for a folder worth windowing
+just shots            # draw every surface headlessly and write the PNGs
 just --list           # the rest
 ```
 
-`just run` is the one to reach for. It brings the container up, closes any rolodex already holding
+`just run` is the one to reach for. It brings the container up, closes any window already holding
 the bridge socket — only one client may — and starts a new one with the window chrome that squares
 its corners when tiled. It also waits for Thunderbird's extension to say hello, and bounces the
 container if it does not: restarting only the window can leave the shim attached with the extension
 never announcing itself again, and the symptom is a window that sits on "Waiting for Thunderbird"
 forever with nothing else visibly wrong.
+
+`just fake` is the fastest loop by a wide margin: no Docker, no profile, and the same deliberately
+nasty mail on screen as a real Thunderbird would serve — `tools/fixture.py` is the one definition
+and both `fake-bridge.py` and `seed.py` read it.
 
 `just` comes from the devshell if it is not on your host (`nix develop -c just run`). Anything that
 touches Docker goes through `scripts/with-docker.sh`, which re-runs itself under the `docker` group
@@ -72,10 +81,12 @@ and `NOCTALIA_MOTION_SCALE=8` runs them in slow motion, which is how the curves 
 
 ```sh
 scripts/run.sh                        # binds $XDG_RUNTIME_DIR/noctmalia/bridge.sock
-tools/fake-bridge.py                  # connects to it and serves contacts from memory
+tools/fake-bridge.py                  # connects to it and serves mail and contacts from memory
 ```
 
-`tools/fake-bridge.py --empty` serves an empty store, for the empty states.
+`tools/fake-bridge.py --empty` serves an empty store, for the empty states. The stand-in pages
+`messages.list` five at a time on purpose: the windowed index and the progressive load are the two
+things a fake that handed everything over at once would never exercise.
 
 ### Against the real thing
 
@@ -89,13 +100,19 @@ sudo usermod -aG docker "$USER"    # then log out and back in, or `newgrp docker
 Boot a headless Thunderbird and put the test data in it:
 
 ```sh
-tools/seed.sh                         # stack up, wait for the bridge, seed accounts + contacts
-tools/seed.sh --reset                 # ...replacing fixture contacts already there
+tools/seed.sh                         # stack up, wait for the bridge, seed accounts, contacts and mail
+tools/seed.sh --reset                 # ...replacing what is already there
+tools/seed.sh --flood 500             # ...plus 500 unremarkable messages
 ```
 
-Both the accounts and the contacts come from `tools/fixture.py`, which is also what
-`tools/fake-bridge.py` serves — so the same people are on screen either way. Seeding is idempotent
-and keeps the profile volume; `docker compose down -v` starts over.
+The accounts, the contacts and the mail all come from `tools/fixture.py`, which is also what
+`tools/fake-bridge.py` serves — so the same people and the same mail are on screen either way.
+Seeding is idempotent and keeps the profile volume; `docker compose down -v` starts over.
+
+Mail is written with `messages.import`, straight into folders with read, flagged and junk already
+set: no SMTP, no IDLE, nothing to wait for. GreenMail stays for the one thing it uniquely tests,
+which is that a message genuinely *arrives* — `tools/smoke.sh` is where that is checked, along with
+Gloda threading and search, a reply that threads, and a filter that reaches `msgFilterRules.dat`.
 
 Then hand the socket to the UI — only one client may hold it, and seeding used the CLI stub:
 
@@ -107,6 +124,53 @@ scripts/run.sh
 The overlay bind-mounts the socket directory into `$XDG_RUNTIME_DIR` — a host process cannot reach a
 named Docker volume. tbd runs as uid 1000 and the socket is mode 0660, so the desktop user must be
 uid 1000 (`id -u`). Either process can start first; the shim retries forever.
+
+## Mail
+
+Three panes and three focus regions, which is mutt's shape: folders, the index, one letter. `h` and
+`l` walk between them, `j` and `k` move, `Enter` opens, and `<Space>` opens a thread — a
+conversation is one row and a number until you ask it to be more. `e` archives, `d` deletes, `u`
+puts it back, `r`/`R`/`f` reply and forward, `S` proposes a rule from the message in front of you,
+`/` filters what is loaded and Enter searches everything. `g i`, `g s`, `g d`, `g a`, `g t` go to
+the folders those letters name, and `g m` / `g c` switch surfaces — the titlebar says which one you
+are in, offers the others as buttons beside the title, and shows a half-typed `g` while you are
+typing it. A count works where you would expect: `3j`, `10gg`.
+
+### One renderer, and it is Markdown
+
+Every letter takes the same road. Plain text is already nearly Markdown, so it stays itself, with
+`>` quoting and `format=flowed` reflow honoured. A Markdown part is what somebody meant. HTML is
+**parsed and rewritten** as Markdown from an allowlist of the dozen elements a letter is made of —
+which is not sanitizing, and the difference is the whole point: a sanitizer subtracts what it
+recognises as dangerous, so its failures survive, while building the output from a list of what is
+allowed means its failures are already gone.
+
+So there is no `src` attribute anywhere in the output, no stylesheet, no script, no frame, and no
+HTML engine to have a bug in. **Remote content cannot load — not "is blocked", cannot**: there is
+no image fetch in the program. An image becomes the word "image" and its alt text; a tracking pixel
+becomes nothing at all and is counted on the way past, so the reader can be told how many there
+were. A link whose words name one site and whose `href` is another says so, which is a check the
+client can make on its own without trusting anybody.
+
+The loss is layout fidelity, which mail spends on making advertisements look like advertisements.
+Where it matters there are two hatches, both one key: `\` shows the source exactly as it arrived,
+and `O` hands the whole message to whatever the desktop opens `.eml` with.
+
+### Nothing is stored outside Thunderbird
+
+Read, flagged and tags are Thunderbird's and go back to IMAP. **Threading is Gloda's** — it assigns
+every message a `conversationID` and has been doing it all along; the gap was in the WebExtension
+API, not in Thunderbird, so there is no JWZ implementation here. **Search is Gloda's** ranked
+full-text index, which cannot be run from outside Thunderbird's process at all: the index declares
+the `mozporter` tokenizer, which Gecko registers at runtime and stock SQLite has never heard of.
+Rules are `msgFilterRules.dat`. Even undo keeps no state worth the name — a numeric message id
+belongs to wherever the message currently is, so undo remembers `headerMessageId` strings and asks
+Thunderbird where they went.
+
+Composing runs the model backwards: the draft is Markdown and goes out as plain text, exactly the
+words that were typed. Thunderbird's compose API decides that one — `plainTextBody` is used only
+when `isPlainText` is true, so sending HTML would mean the recipient gets a re-rendering rather than
+the original. A Markdown document is a plain-text document; that is what the format is for.
 
 ## Looking like the rest of the desktop
 
@@ -172,14 +236,20 @@ out.
 ## Status
 
 - **Verified by running it:** the transport (reconnect, out-of-order replies, in-flight failure on
-  disconnect, the 1 MiB cap), vCard round-tripping, and contacts list/search/create/update/delete.
-- **Runs against a real Thunderbird** (155.0.1 headless, 2026-09-13): `tools/seed.sh` provisions two
-  IMAP accounts and writes the fixture into the profile, and the rolodex lists all seven contacts
-  out of Thunderbird's own address books. `UID` and `X-` properties survive an edit round trip, and
-  `contacts.quickSearch` accepts either argument shape — `docs/findings.md` §8 has the details.
-- **Keyboard:** up and down move through the contact list, scrolling it if the selection would
-  leave the viewport; ctrl+N starts a contact, ctrl+E edits the selected one, ctrl+S saves; Tab and
-  shift+Tab walk the editor's fields; Escape backs out of the editor, a delete confirmation, or the
-  notice. A focused text field keeps its own arrows.
-- **Still untested:** everything mail. The read path is the next surface, and postal-address editing
-  is the gap in the contact editor.
+  disconnect, the 1 MiB cap), vCard round-tripping, contacts list/search/create/update/delete, and
+  the MIME and Markdown pipeline against deliberately hostile mail.
+- **Runs against a real Thunderbird** (155.0.1 headless): `tools/seed.sh` provisions two IMAP
+  accounts and writes the fixture — contacts *and* mail — into the profile. `tools/smoke.sh` covers
+  the whole round trip including Gloda threading and search, a reply that threads, and a filter that
+  reaches `msgFilterRules.dat`. Those last three ride Thunderbird internals rather than the
+  WebExtension API, so smoke is the thing to run on every Thunderbird bump.
+- **Checked against the widget tree, not just the parser:** `crates/noctmalia/tests/mail.rs` lays
+  the real mail surface out headlessly and asserts that a newsletter full of beacons puts no tracker
+  URL on screen, and that a folder of five thousand messages builds a screenful of rows rather than
+  five thousand.
+- **Keyboard:** see [Mail](#mail). In contacts, `j`/`k` and the arrows move, `gg`/`G` jump, `/`
+  searches, `n`/`e` start and edit, ctrl+S saves, Tab walks the editor's fields, Escape backs out.
+  A focused text field keeps its own keys — iced reports a press a widget consumed, and the keymap
+  never sees it.
+- **Still missing:** reopening a saved draft, a `from:`/`is:unread`/`before:` grammar over Gloda
+  search, a key for tags, and postal-address editing in the contact editor.
