@@ -1,0 +1,32 @@
+[package]
+name = "noctmalia"
+description = "A Noctalia-native front end for Thunderbird, running headless as a daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[features]
+# Wayland chrome with the shadow outside the window geometry; needs noctalia-iced's patched crates.
+wayland-chrome = ["noctalia-iced/wayland-chrome"]
+
+[lib]
+name = "noctmalia"
+path = "src/lib.rs"
+
+[[bin]]
+name = "noctmalia"
+path = "src/main.rs"
+
+[dependencies]
+noctmalia-bridge.workspace = true
+noctalia-iced.workspace = true
+iced.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+toml = "0.9"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

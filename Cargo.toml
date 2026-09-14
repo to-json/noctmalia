@@ -1,0 +1,23 @@
+[workspace]
+resolver = "3"
+members = ["crates/noctmalia-bridge", "crates/noctmalia"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.88"
+
+[workspace.dependencies]
+noctmalia-bridge = { path = "crates/noctmalia-bridge" }
+# The UI toolkit lives in its own repository next to this one.
+noctalia-iced = { path = "../noctalia-iced/crates/noctalia-iced" }
+iced = { version = "0.14", features = ["canvas", "advanced", "tokio"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "net", "sync", "io-util", "macros", "time"] }
+
+# iced's renderer — wgpu, the text stack, tiny-skia — is unusably slow unoptimised, and a `cargo run`
+# is the normal way to start the app. Optimise dependencies while keeping our own crates debuggable.
+[profile.dev.package."*"]
+opt-level = 3

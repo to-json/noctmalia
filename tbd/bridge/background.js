@@ -43,6 +43,15 @@ function base64ToFile(data, name, type) {
   return new File([bytes], name, { type });
 }
 
+// MV2 ContactNode carries the vCard under `properties`; MV3 exposes it at the top level.
+// Normalise so clients always read `vCard`, and keep `properties` for everything else.
+function contactNode(node) {
+  if (!node) {
+    return node;
+  }
+  return { ...node, vCard: node.vCard ?? node.properties?.vCard ?? null };
+}
+
 async function info() {
   return {
     protocol: PROTOCOL,
@@ -104,6 +113,40 @@ const methods = {
   "tags.create": ({ key, tag, color }) => messenger.messages.tags.create(key, tag, color),
   "tags.update": ({ key, updateProperties }) => messenger.messages.tags.update(key, updateProperties),
   "tags.delete": ({ key }) => messenger.messages.tags.delete(key),
+
+  "addressBooks.list": ({ complete = false } = {}) => messenger.addressBooks.list(complete),
+  "addressBooks.get": ({ addressBookId, complete = false }) => messenger.addressBooks.get(addressBookId, complete),
+  "addressBooks.create": ({ name }) => messenger.addressBooks.create({ name }),
+  "addressBooks.update": ({ addressBookId, name }) => messenger.addressBooks.update(addressBookId, { name }),
+  "addressBooks.delete": ({ addressBookId }) => messenger.addressBooks.delete(addressBookId),
+
+  "contacts.list": async ({ parentId }) => (await messenger.contacts.list(parentId)).map(contactNode),
+  "contacts.quickSearch": async ({ parentId, searchString }) =>
+    (await (parentId
+      ? messenger.contacts.quickSearch(parentId, searchString)
+      : messenger.contacts.quickSearch(searchString))
+    ).map(contactNode),
+  "contacts.get": async ({ contactId }) => contactNode(await messenger.contacts.get(contactId)),
+  "contacts.create": ({ parentId, vCard }) => messenger.contacts.create(parentId, { vCard }),
+  "contacts.update": ({ contactId, vCard }) => messenger.contacts.update(contactId, { vCard }),
+  "contacts.delete": ({ contactId }) => messenger.contacts.delete(contactId),
+  "contacts.getPhoto": async ({ contactId }) => {
+    const file = await messenger.contacts.getPhoto(contactId);
+    return file ? { base64: await fileToBase64(file), type: file.type } : null;
+  },
+  "contacts.setPhoto": ({ contactId, base64, type = "image/png" }) =>
+    messenger.contacts.setPhoto(contactId, base64ToFile(base64, "photo", type)),
+
+  "mailingLists.list": ({ parentId }) => messenger.mailingLists.list(parentId),
+  "mailingLists.get": ({ mailingListId }) => messenger.mailingLists.get(mailingListId),
+  "mailingLists.create": ({ parentId, ...properties }) => messenger.mailingLists.create(parentId, properties),
+  "mailingLists.update": ({ mailingListId, ...properties }) => messenger.mailingLists.update(mailingListId, properties),
+  "mailingLists.delete": ({ mailingListId }) => messenger.mailingLists.delete(mailingListId),
+  "mailingLists.addMember": ({ mailingListId, contactId }) => messenger.mailingLists.addMember(mailingListId, contactId),
+  "mailingLists.removeMember": ({ mailingListId, contactId }) =>
+    messenger.mailingLists.removeMember(mailingListId, contactId),
+  "mailingLists.listMembers": async ({ mailingListId }) =>
+    (await messenger.mailingLists.listMembers(mailingListId)).map(contactNode),
 
   "mail.checkNow": ({ accountId } = {}) => messenger.noctmalia.checkMail(accountId),
   "dev.provisionAccount": (config) => messenger.noctmalia.provisionAccount(config),
@@ -181,6 +224,27 @@ forward(messenger.folders.onFolderInfoChanged, "folders.onFolderInfoChanged", (f
 forward(messenger.accounts.onCreated, "accounts.onCreated", (accountId, account) => ({ accountId, account }));
 forward(messenger.accounts.onDeleted, "accounts.onDeleted", (accountId) => ({ accountId }));
 forward(messenger.accounts.onUpdated, "accounts.onUpdated", (accountId, changed) => ({ accountId, changed }));
+
+forward(messenger.addressBooks.onCreated, "addressBooks.onCreated", (node) => ({ addressBook: node }));
+forward(messenger.addressBooks.onUpdated, "addressBooks.onUpdated", (node) => ({ addressBook: node }));
+forward(messenger.addressBooks.onDeleted, "addressBooks.onDeleted", (addressBookId) => ({ addressBookId }));
+forward(messenger.contacts.onCreated, "contacts.onCreated", (node) => ({ contact: contactNode(node) }));
+forward(messenger.contacts.onUpdated, "contacts.onUpdated", (node, changed) => ({
+  contact: contactNode(node),
+  changed,
+}));
+forward(messenger.contacts.onDeleted, "contacts.onDeleted", (parentId, contactId) => ({ parentId, contactId }));
+forward(messenger.mailingLists.onCreated, "mailingLists.onCreated", (node) => ({ mailingList: node }));
+forward(messenger.mailingLists.onUpdated, "mailingLists.onUpdated", (node) => ({ mailingList: node }));
+forward(messenger.mailingLists.onDeleted, "mailingLists.onDeleted", (parentId, mailingListId) => ({
+  parentId,
+  mailingListId,
+}));
+forward(messenger.mailingLists.onMemberAdded, "mailingLists.onMemberAdded", (node) => ({ contact: contactNode(node) }));
+forward(messenger.mailingLists.onMemberRemoved, "mailingLists.onMemberRemoved", (parentId, contactId) => ({
+  parentId,
+  contactId,
+}));
 
 if (calendar?.calendars) {
   const ical = [{ returnFormat: "ical" }];

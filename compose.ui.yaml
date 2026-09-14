@@ -1,0 +1,18 @@
+# The UI on the host, Thunderbird in the container.
+#
+#   docker compose -f compose.yaml -f compose.ui.yaml up -d --build tbd
+#   cargo run -p noctmalia            # binds $XDG_RUNTIME_DIR/noctmalia/bridge.sock
+#
+# A host process cannot reach a named volume, so the socket directory becomes a bind mount into
+# $XDG_RUNTIME_DIR. tbd runs as uid 1000 and noctmalia creates the socket mode 0660, so this works
+# as long as the desktop user is uid 1000 — check with `id -u`.
+#
+# Nothing listens until noctmalia is running; the shim retries forever, so either order is fine.
+
+services:
+  tbd:
+    volumes:
+      - tbd-profile:/data/profile
+      - ${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR must be set}/noctmalia:/run/noctmalia
+    # The mailnd stub is what noctmalia replaces here.
+    depends_on: !reset []

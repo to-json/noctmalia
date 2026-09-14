@@ -1,0 +1,3 @@
+# Matches noctalia-iced next door: wide lines, and short blocks left on one line.
+max_width = 120
+use_small_heuristics = "Max"

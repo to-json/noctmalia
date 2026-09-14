@@ -1,0 +1,13 @@
+# Cargo config applying noctalia-iced's patched windowing crates, for builds with the
+# `wayland-chrome` feature: the frame keeps its rounded corners and shadow in a margin outside the
+# xdg window geometry, and follows the compositor's maximized/fullscreen/tiled states.
+#
+#   scripts/run.sh --chrome
+#   cargo --config third_party/patch.toml build --features wayland-chrome   (rewrites Cargo.lock)
+#
+# Cargo resolves paths in a --config file against the parent of the file's directory, so these are
+# relative to the workspace root. The crates live in the sibling repository.
+[patch.crates-io]
+winit = { path = "../noctalia-iced/third_party/rust/winit" }
+iced_core = { path = "../noctalia-iced/third_party/rust/iced_core" }
+iced_winit = { path = "../noctalia-iced/third_party/rust/iced_winit" }

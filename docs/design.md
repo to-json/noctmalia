@@ -1,8 +1,13 @@
 # noctmalia — Thunderbird as a daemon, Noctalia-toolkit UI
 
-> **2026-09-13:** see `docs/findings.md` for everything verified so far and for handoff notes. The mailnd layer below is under review; the proposal is to replace it with a stateless multi-client hub in the shim (findings §2). The UI sections still stand.
+> **2026-09-13:** see `docs/findings.md` for everything verified. Two things below are now settled
+> differently: **mailnd is gone** — the UI binds the socket itself (findings §2) — and **the UI is
+> Rust on iced**, built on the sibling repository `../noctalia-iced`, not the C++ toolkit. The
+> product direction, the principles and the hard problems all still stand; the imagined C++ API
+> sketches are kept only as a record of the shape that was wanted.
 
-Status: design sketch. The bridge was tested in a container (see `spike/bridge-probe`). The Noctalia toolkit API used here is imagined, modelled on noctalia v5 `src/ui/`.
+Status: the transport, the contacts surface and a contacts UI exist and are tested (against a fake
+Thunderbird, not a real one). Mail and calendar are still design.
 
 ## Verified in a container (2026-09-13)
 
@@ -24,25 +29,32 @@ Not verified yet:
 
 ## Architecture
 
+As built (2026-09-13):
+
 ```
 ┌──────────────── container: tbd ────────────────┐
 │ thunderbird --headless (MV2, persistent bg)    │
 │   └ noctmalia-bridge.xpi ── native messaging ──┐│
 │       nm-shim (stdio ↔ unix socket, stateless) ┘│
-│ mailnd (Rust)  ◄── /run/noctmalia/bridge.sock  │
-│   thread builder · search index · snooze/undo  │
-│   JSON-RPC over unix socket ───────────────────┼──► /run/noctmalia/mail.sock (volume)
-└────────────────────────────────────────────────┘
-┌──────────── container: ui (or host) ───────────┐
-│ noctmalia (C++, noctalia toolkit)              │  WAYLAND_DISPLAY socket mounted
-│   xdg_toplevel main window                     │
-│ noctalia plugin: bar badge · triage panel ·    │
-│   notifications · launcher provider            │
+│         │ connects out                         │
+└─────────┼──────────────────────────────────────┘
+          │  $XDG_RUNTIME_DIR/noctmalia/bridge.sock   (bind mount, compose.ui.yaml)
+┌─────────▼──── host ────────────────────────────┐
+│ noctmalia (Rust, iced + noctalia-iced)         │
+│   noctmalia-bridge: listens, matches replies   │
+│   by id, streams events                        │
+│   native Wayland window, Noctalia chrome       │
 └────────────────────────────────────────────────┘
 ```
 
-### Why the extension stays thin and mailnd exists
-- TB's extension API has gaps that mailnd fills:
+The daemon in the middle is gone: the app is the socket's owner. One client at a time, which is
+enough until a second surface exists (findings §2).
+
+### Why a daemon was planned, and what deferring it costs
+The gaps below are real; the decision was that none of them block contacts, calendar or a mail read
+path, and that a hub can be grown out of `crates/noctmalia-bridge` when a second client needs one.
+
+- TB's extension API has gaps that a daemon would fill:
   - **No thread API.** mailnd builds threads itself (JWZ threading over `References`/`In-Reply-To`).
   - **`messages.query({fullText})` is a linear MIME scan, not Gloda.** mailnd keeps a tantivy index, fed incrementally from `getRaw` and `onNewMailReceived`.
   - **No snooze, undo-send, send-later UX or muting.** mailnd owns these and stores state as TB tags or hidden folders, so it survives on the IMAP server.
@@ -62,7 +74,7 @@ Not verified yet:
   - Worth copying: the native-messaging registration and the extension-ID allowlist.
 - **Why MV2:** MV3 event pages are killed when idle, which drops the socket.
 
-### RPC surface (mailnd ↔ UI)
+### RPC surface a daemon would expose (not built; the app calls the bridge directly)
 ```
 accounts.list  folders.tree  counts.get
 threads.list {view, query?, cursor, limit}      # views: unified-inbox, flagged, snoozed, newsletters, folder:<id>
@@ -100,21 +112,21 @@ events: mail.new  thread.changed  counts.changed  sync.state  send.progress  bri
 - **Blends in by construction.** Only the 16 palette roles and `Style::*` tokens are used, never fixed colors, so wallpaper and palette changes apply live.
 - **Optimistic actions.** The row animates out immediately and the RPC runs behind it. A failed RPC rolls back with an error toast. Every destructive action gets an undo toast.
 
-### Widget mapping (imagined API → existing noctalia v5 controls)
+### Widget mapping (iced + noctalia-iced)
 | Surface | Controls |
 |---|---|
-| Rail | `Flex` column, `Button` variant `Tab` + `setBadge`, `Collapsible` per account |
-| Thread list | `VirtualListView` with a custom `ThreadRow : Flex` (`Glyph` avatar, `Label`×3) |
-| Reader | `ScrollView` of `MessageCard : Collapsible`; body in **`HtmlView` (new)** |
-| Inline reply | **`TextEdit` (new, multi-line rich)** + `Button` Primary; `Select` for from-identity |
-| Search | `Input` with token chips, results reuse `VirtualListView` |
-| Snooze | `ContextMenu` presets + `CalendarView` for a custom date |
-| Undo send / undo archive | toast with **`CountdownRing`** tied to mailnd's hold window |
-| Attachments | `GridView` of tiles; `DragSource` out, `DropZone` on composer |
-| Settings | `Toggle`, `Segmented`, `ListEditor` (signatures, identities), `KeybindRecorder` |
-| Sync state | `Spinner` / `ProgressBar` in rail footer, driven by `sync.state` |
+| Rail | `column` of `button`s with `theme::button_style(Tab/Selected)`; `widgets::collapsible` per account |
+| Thread list | `scrollable` of row buttons, as `contact_row` does today. iced has no virtual list; large folders will need paging or a custom widget. |
+| Reader | `scrollable` of `widgets::collapsible` cards; body in **an HTML view that does not exist yet** |
+| Inline reply | iced `text_editor` plus `widgets::action`; `pick_list` for the from-identity |
+| Search | `text_input` with a leading icon (`text_input::Icon`), results reuse the list |
+| Snooze | a menu of presets; iced has no calendar widget, so a custom date needs one |
+| Undo send / undo archive | a notice bar with `widgets::countdown_ring` |
+| Attachments | a wrapping row of tiles; iced drag-and-drop is limited to window file drops |
+| Settings | `widgets::toggle`, `widgets::segmented`, `widgets::stepper`, `widgets::setting` rows |
+| Sync state | `widgets::spinner` in the rail footer |
 
-### Sketch in the imagined API
+### Sketch in the imagined C++ API (historical — the app is iced now)
 ```cpp
 auto row = std::make_unique<ThreadRow>();
 row->setOnSwipe([this, id = t.id](SwipeDir d) {
@@ -186,13 +198,18 @@ events: cal.changed  cal.alarm
    - Check whether an official linux-aarch64 build exists. Otherwise use amd64 under emulation on this Mac.
 5. **Initial sync and indexing cost.** The first index over large IMAP accounts is slow through `getRaw`. mailnd indexes newest messages first and serves `search` from the partial index with a "still indexing" hint.
 
-## Toolkit asks (what the imagined noctalia library must add)
-- An app-window host: `xdg_toplevel` with resize, decorations negotiation and min size. It exists internally (`toplevel_surface`) but only the settings window uses it.
-- `HtmlView` (litehtml backend)
-- A multi-line rich `TextEdit`
-- A swipe/drag gesture recognizer on `Flex`
-- A toast host with an action slot
-- A promise-style async adaptor for RPC callbacks into the UI thread
+## Toolkit asks
+
+Most of the original list is answered by noctalia-iced: the app window and chrome, theming, scroll
+views, text inputs, toggles, segmented controls, the countdown ring and the spinner all exist, and
+`Task::perform` is the async → UI adaptor. What is still missing:
+
+- **An HTML mail view.** Still the hard problem; iced has no HTML engine. litehtml behind a custom
+  widget remains the plan, now with an iced `Renderer` backend rather than cairo.
+- **A rich multi-line editor.** iced's `text_editor` gives editing, selection and IME but not rich
+  text; the draft model being markdown-ish makes that survivable.
+- **Swipe gestures on rows.** Needs a custom widget wrapping the row's mouse events.
+- **A virtual list.** Fine to skip for contacts; not fine for a 50k-message folder.
 
 ## Build order
 1. ~~`tbd` image~~ — **done 2026-09-13** (`tbd/`, `compose.yaml`, `tools/smoke.sh` PASS).
@@ -205,8 +222,15 @@ events: cal.changed  cal.alarm
      - `messages.send` is an *optional-only* permission. The bridge grants it through `ExtensionPermissions` and reloads once, because a headless add-on can't show a permission prompt.
      - `MailServices.accounts.localFoldersServer` throws on a fresh profile instead of returning null.
      - Gecko replaces any error that isn't an `ExtensionError` with "An unexpected error occurred". The `noctmalia` Experiment re-wraps errors so the real message and stack come through.
-2. Bridge protocol plus mailnd skeleton: accounts, folders, message list, bodies, act. Add a CLI client to exercise it.
-3. Threading, tantivy index, undo/snooze/send-delay in mailnd.
-4. UI read path: rail, thread list, reader in text mode.
-5. `HtmlView`, then `TextEdit` composer, then send.
-6. Plugin surfaces: bar badge, notifications, triage panel, launcher.
+2. ~~Transport~~ — **done 2026-09-13**. `crates/noctmalia-bridge`: the client binds the socket, matches
+   replies by id, streams events. `tests/transport.rs` covers reconnect, out-of-order replies,
+   in-flight failure on disconnect and the 1 MiB cap.
+3. ~~Contacts~~ — **done 2026-09-13**. Bridge methods for address books, contacts and mailing lists;
+   a vCard parser that preserves what it does not model; the rolodex window. Not yet run against a
+   real Thunderbird.
+4. **Contacts, finished:** run it against tbd, then postal-address editing, photos
+   (`contacts.getPhoto`/`setPhoto`, both on the bridge already) and mailing lists in the rail.
+5. Mail read path: rail, message list, reader in text mode. Threading is not available from
+   Thunderbird's API, so the first pass lists messages, not threads.
+6. An HTML view, then the composer, then send.
+7. A second surface (bar badge, notifications) — this is what forces the hub in findings §2.

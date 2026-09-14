@@ -1,7 +1,7 @@
 # noctmalia — findings & handoff
 
-Snapshot: 2026-09-13. Development happened on macOS (arm64) with Docker Desktop and is moving to Linux hardware.
-This file is the source of truth for what has been **verified**. `docs/design.md` covers UI and product direction; its mailnd sections are under review (see §2).
+Snapshot: 2026-09-13. The backend was developed on macOS (arm64) with Docker Desktop; the UI work is on Linux x86_64, where Thunderbird runs natively.
+This file is the source of truth for what has been **verified**. `docs/design.md` covers UI and product direction.
 
 Legend: ✅ verified by running it · ⚠️ partially verified · ❓ untested · ❌ not possible with the official API
 
@@ -24,22 +24,27 @@ A mail, calendar, contacts and todo client that looks native on a Noctalia deskt
 │           └ nm-shim (stateless relay, spawned by TB)         │
 └──────────────── NDJSON over unix socket /run/noctmalia/bridge.sock
                   │
-          currently: tools/mailnd-stub.py (dev stand-in) + tools/bridgectl.py
+                  │
+          noctmalia (Rust, iced) binds the socket and listens; the shim connects in
+          tools/mailnd-stub.py + tools/bridgectl.py remain as the CLI path
 ```
 
-### Open decision: mailnd or a hub
-The original design put a Rust daemon, `mailnd`, between the bridge and the UI to handle threading, a search index, snooze and undo-send, and multiple clients. The user asked why we need it at all.
+### Decided (2026-09-13): no mailnd, no hub yet
+`mailnd` is dropped. The UI binds the socket itself (`crates/noctmalia-bridge`) and Thunderbird's shim connects into it.
 
-**Proposal, not yet decided:** drop mailnd.
-- Turn `nm-shim` into a small **hub**. It listens on the socket, accepts several clients (main window, Noctalia bar/notification plugin), routes each reply back by id to the client that asked, and sends events to every client. It keeps no data.
-- Take threads, search and undo from Thunderbird itself through our Experiment (§6). Drop snooze and undo-send for now.
-- Tradeoff: depending on Thunderbird internals means pinning the version and running the tests on every Thunderbird bump.
+- **Why it works:** the shim reconnects forever, so the UI may come and go; `bridge.hello` fires on every attach, including after a Thunderbird restart, and is the signal to resync.
+- **What it costs:** one client at a time. A second surface (a Noctalia bar widget, a notification handler) needs a hub in front. That hub is `serve()` in `crates/noctmalia-bridge/src/lib.rs` plus a fanout table, not a rewrite — the accept loop already serves connections one after another.
+- **What was deferred with it:** threading, a search index, snooze and undo-send. Contacts, calendar and the mail read path need none of them.
 
 ## 3. Repo map
 
 | Path | What |
 |---|---|
+| `Cargo.toml`, `scripts/cargo.sh` | Rust workspace. `cargo` lives in noctalia-iced's nix devshell; the script wraps it. |
+| `crates/noctmalia-bridge` | Client side of the protocol: binds the socket, NDJSON framing, request/reply by id, an event stream. Tested against a fake shim in `tests/transport.rs`. |
+| `crates/noctmalia` | The app. `vcard` (parse/write), `contacts` (typed calls), `app` (the rolodex). |
 | `compose.yaml` | `tbd`, `mailnd` (Python stub), `greenmail` (profile `dev`) |
+| `compose.ui.yaml` | Overlay for a host-native UI: bind-mounts the socket dir into `$XDG_RUNTIME_DIR` instead of a named volume |
 | `tbd/Dockerfile` | Mozilla x86_64 tarball, SHA-512 pinned; non-root uid 1000; healthcheck = shim alive |
 | `tbd/entrypoint.sh` | Rewrites `user.js` and the bridge XPI on each start, registers the native-messaging host, clears stale locks, `TBD_MODE=headless\|gui`, filters Gtk log noise, forwards signals |
 | `tbd/prefs/user.js` | Managed prefs: sideloading, no first-run UI, no updates or telemetry, IDLE plus 1-minute biff, console to stdout, dev pref off |
@@ -49,12 +54,13 @@ The original design put a Rust daemon, `mailnd`, between the bridge and the UI t
 | `tbd/bridge/experiments/calendar/` | Upstream calendar Experiment, unmodified; pinned commit in `UPSTREAM` |
 | `tbd/README.md` | Bridge protocol v1: every method, event and env var |
 | `tools/smoke.sh` | End-to-end test against GreenMail. Wipes volumes. Last result: PASS |
-| `tools/mailnd-stub.py`, `tools/bridgectl.py` | Dev stand-in for mailnd, plus a CLI (`status`, `call`, `wait`) |
+| `tools/mailnd-stub.py`, `tools/bridgectl.py` | Socket-owning stand-in plus a CLI (`status`, `call`, `wait`) |
+| `tools/fake-bridge.py` | The opposite: a Thunderbird stand-in that serves contacts from memory, so the UI runs with no container. Drives `crates/noctmalia/tests/contacts.rs`. |
 | `spike/bridge-probe` | First headless and MailExtension probe (TB 140) |
 | `spike/native-messaging-probe` | Native messaging works headless, with host-initiated push |
 | `spike/calendar-experiment-probe` | Calendar Experiment CRUD on TB 140 and 155 |
 | `spike/boundary-probe` | Compose windows, contacts, tasks and reminders in an isolated TB container (§6) |
-| `docs/design.md` | UI and product design; mailnd parts under review |
+| `docs/design.md` | UI and product design |
 
 ## 4. Running it
 
@@ -138,7 +144,7 @@ docker compose --profile dev down                    # stop (add -v to wipe)
 | Mail: search | fast full-text | official (slow scan) · Gloda via ours | ⚠️ slow path only |
 | Mail: accounts | create/edit/delete, OAuth, check now | ours | ✅ password IMAP/SMTP, check now · ❌ OAuth, edit, delete |
 | Mail: filters, saved searches, IMAP subscriptions, junk/retention settings, undo, remote-content allowlist, read receipts | — | ours | ❌ not built |
-| Contacts | books, vCard CRUD, search/autocomplete, mailing lists | official | ✅ create/search/update/list-member/delete · ⚠️ field read-back unverified |
+| Contacts | books, vCard CRUD, search/autocomplete, mailing lists | official | ✅ exposed on the bridge and driven by the UI · ❓ field read-back against real Thunderbird still unverified (only against `fake-bridge.py`) |
 | Calendar | calendars, events, recurrence, timezones | upstream | ✅ · ❓ CalDAV subscription |
 | Calendar: invites | accept/decline, iTIP replies | ours | ❌ not built |
 | Todos | VTODO create/complete/query | upstream (`type: "task"`) | ✅ |
@@ -146,27 +152,111 @@ docker compose --profile dev down                    # stop (add -v to wipe)
 
 **Design rule:** the bridge today mirrors `messenger.*` names one-to-one. For the UI it should expose operations by area instead (`mail.reply`, `task.complete`, `reminder.snooze`, `contacts.search`), and choose the backing internally.
 
-## 7. Noctalia (context for the UI)
-- **Noctalia v5 is C++20, not QML.** It talks to Wayland directly and renders with OpenGL ES, cairo, pango and freetype, with no Qt or GTK. Repo `noctalia-dev/noctalia`, v5.1.0 (2026-09-10). v4 QML is frozen on `legacy-v4`.
-- **Upstream toolkit shape, for reference.** The user has extracted the widget library separately (now finished), so check that library's actual API first:
-  - widgets in `src/ui/controls/`
-  - imperative setters, `std::function` callbacks, `Signal<>`
-  - 16 palette `ColorRole`s (`primary`, `on_surface`, …)
-  - `Style::` spacing, radius and font tokens
-  - `AnimationManager`
-  - controls include `VirtualListView`, `ScrollView`, `MarkdownView`, `Input`, `ContextMenu`, `CalendarView` and `CountdownRing`
-- **Plugins:** Luau (`plugin.toml`). Entry types: bar widget, panel, desktop widget, service, launcher provider. Plugins have no toplevel window API; the codebase has `toplevel_surface`, used only by the settings window.
+## 7. The UI toolkit
+
+**The client is Rust on iced, not C++.** It builds on **noctalia-iced**, the sibling repository at
+`../noctalia-iced`: Noctalia's palette roles and style tokens, its controls rebuilt from iced
+widgets, and Noctalia-style window chrome. That settles most of what the old "toolkit asks" list
+wanted — the app window, the frame, theming, scroll views, text inputs — out of the box.
+
+- **Dependency:** a path dependency across repositories (`../noctalia-iced/crates/noctalia-iced`).
+  It is its own cargo workspace; inheritance resolves against its own root, so nothing needs vendoring.
+- **Toolchain:** neither cargo nor rustc is installed on this machine. `flake.nix` here provides the
+  devshell (same nixpkgs revision as noctalia-iced, so both share a glibc); `scripts/cargo.sh` and
+  `scripts/run.sh` wrap it. `nix` needs `--extra-experimental-features 'nix-command flakes'` on this
+  machine, and `nix develop` reads the *git tree*, so a new file must be `git add`ed before the
+  shell can see it.
+- **A devshell without Mesa means software rendering, and it does not announce itself.**
+  noctalia-iced's devshell puts nix's `libglvnd` and `vulkan-loader` on `LD_LIBRARY_PATH` with no
+  Mesa behind them and no `LIBGL_DRIVERS_PATH`, so iced silently fell back to llvmpipe; the symptom
+  is the app appearing catastrophically slow, not a driver error. Our devshell adds `mesa`,
+  `libgbm`, `LIBGL_DRIVERS_PATH` and `__EGL_VENDOR_LIBRARY_DIRS`.
+  - **Running outside the shell is not the fix.** A binary built there links nix's glibc *and nix's
+    loader*, so with `LD_LIBRARY_PATH` unset it cannot find `libwayland-client` either
+    (`WaylandError(Connection(NoWaylandLib))`), and it could not load `/usr/lib/dri` drivers built
+    against system glibc anyway.
+  - **Checking which driver you got:** `ls -l /proc/$(pgrep -x noctmalia)/fd | grep /dev/dri`. A
+    hardware driver holds the render node open; llvmpipe opens nothing. Mesa 25+ has no separate
+    `*_dri.so` to look for — the gallium drivers live inside `libgallium.so`.
+- **Debug builds are not usable for judging the UI.** `[profile.dev.package."*"] opt-level = 3` in
+  the workspace manifest optimises iced, wgpu and the text stack while keeping our crates
+  debuggable.
+- **This machine's GPU (Intel HD 4000, Ivy Bridge/Gen7) cannot render iced correctly in hardware.**
+  This cost an afternoon, so in detail:
+  - **Symptom:** torn frames. Only the most recently redrawn rectangle is painted and the rest of the
+    window goes black or stale, so the window appears to flicker, look "weirdly lit", and dim under
+    the pointer. It is worst when the app sits idle, because iced redraws on demand.
+  - **It is not the application.** noctalia-iced's own clock demo corrupts identically, in the same
+    session. Do not debug this in application code.
+  - **It is not performance.** Continuously driven, the app holds a vsync-locked 60fps with `view()`
+    at 0.06–0.13 ms, and burns 0% CPU idle. Measure before believing "slow": `NOCTMALIA_FPS=1`
+    reports redraws/s and `view()` time, `NOCTMALIA_FPS=drive` redraws continuously for the ceiling.
+  - **Both hardware paths are bad.** Mesa's Gen7 Vulkan announces itself — `MESA-INTEL: warning: Ivy
+    Bridge Vulkan support is incomplete` — and wgpu picks it by default. `WGPU_BACKEND=gl` moves to
+    `crocus`, which still tears.
+  - **`LIBGL_ALWAYS_SOFTWARE=1` renders correctly**, holds 60fps on this UI, and costs ~180% of a
+    core only while continuously redrawing. `scripts/run.sh` sets it; `NOCTMALIA_GPU=1` opts out, and
+    should be the default on anything newer.
+  - Note that the system's Vulkan ICDs (`/usr/share/vulkan/icd.d`) are Gen8+ only — nix's Mesa ships
+    its own, which is what the app actually loads. Checking the host's drivers proves nothing about
+    what a devshell binary uses.
+- **Icons:** `theme::ICON_FONT_BYTES` is the whole Tabler set (5958 glyphs); `theme::icon` only names
+  nine of them. Any codepoint works with `widgets::icon(char, size)` — the ones the app uses are
+  listed in `crates/noctmalia/src/app.rs`.
+- **Follow the shell's palette, not the library's constants.** noctalia-iced originally hardcoded
+  sixteen `const Color` roles, so every application looked like Noctalia's default theme rather than
+  the user's. It now carries a `theme::Palette` with `theme::palette()` / `theme::set_palette`; the
+  constants remain the defaults. `crates/noctmalia/src/palette.rs` reads the live one:
+  - `$XDG_STATE_HOME/noctalia/settings.toml` → `[theme] source`, `custom_palette`,
+    `community_palette`, `mode`.
+  - `source = "custom"` → `$XDG_CONFIG_HOME/noctalia/palettes/<name>.json`; `"community"` →
+    `$XDG_STATE_HOME/noctalia/community-palettes/<percent-encoded name>.json`; a built-in ships
+    inside noctalia-shell and cannot be read, so the default stands.
+  - The file holds `dark` and `light` sets of `mPrimary`-style roles. Missing roles keep the default
+    rather than failing the whole load.
+  - A background thread re-reads them once a second and only sends on a real change, so following
+    the theme costs no redraws while nothing happens. Polling beats inotify here: it is immune to the
+    write-to-temp-and-rename that config writers do.
+- **Typography has the same trap, and it is worse because it is silent.** iced renders text through
+  cosmic-text, whose `FontSystem::new` hardcodes its generic families: sans-serif is the literal
+  name **`Open Sans`** (monospace `Noto Sans Mono`, serif `DejaVu Serif`). fontdb does no metric
+  aliasing, so where `Open Sans` is not installed — it is not, here — the fallback is the font
+  database's first family, a **serif**. Two
+  consequences:
+  - **Fix it at the source, no fork needed.** `iced::advanced::graphics::text::font_system()` is
+    public (the `advanced` feature, which we already enable), and through `.raw().db_mut()` the three
+    generic families can be rewritten from `fc-match` before the first frame —
+    `font::adopt_system_families()`. That reaches iced's own widgets and any library that never
+    names a family. `crates/noctmalia/src/font.rs` also passes the resolved family to iced's
+    `default_font` and to `theme::set_font`, so the chrome matches the content explicitly.
+  - **`Font { weight: Semibold, ..Font::DEFAULT }` was the trap:** the weight changes but the family
+    reverts to the generic default, so every heading rendered in a different typeface from the text
+    under it — noctalia-iced's titlebar and countdown ring included. Correcting the generics defuses
+    it; `theme::set_font` / `theme::semibold()` make it explicit anyway.
+  - This is not a system misconfiguration. fontconfig answers correctly; iced never asks it.
+- **Styling rule, unchanged:** only palette roles and `theme::*` tokens, never fixed colours, so a
+  wallpaper or palette change applies without touching the app.
+- **`wayland-chrome`** is an opt-in feature needing noctalia-iced's patched winit/iced crates. The app
+  builds without it; the frame then fills the surface with no shadow margin. `third_party/patch.toml`
+  points at the sibling repository's copies and `scripts/run.sh --chrome` applies it, restoring
+  `Cargo.lock` afterwards so the committed lockfile stays the crates.io one.
+- **Still missing for mail** (unchanged by the move to iced):
+  - an HTML mail view — iced has no HTML engine, and this is still the hard problem
+  - a multi-line rich text editor for compose (iced's `text_editor` is the starting point, not the answer)
+  - swipe gestures on list rows
+
+### Noctalia itself (context)
+- **Noctalia v5 is C++20, not QML.** Wayland directly, OpenGL ES, cairo, pango, freetype; no Qt or GTK. Repo `noctalia-dev/noctalia`, v5.1.0 (2026-09-10). v4 QML is frozen on `legacy-v4`.
+- **Plugins:** Luau (`plugin.toml`). Entry types: bar widget, panel, desktop widget, service, launcher provider. Plugins have no toplevel window API. A plugin surface would be a second client, which is what would force the hub in §2.
 - **Prior art:** `noctalia-dev/community-plugins/thunderbird-companion`. A native-messaging Python host plus file polling for an unread badge, 50 recent headers and 7 commands. Opens Thunderbird's own windows. Reuse its native-messaging registration idea, not its polling design.
-- **Toolkit pieces the client needs beyond stock controls:**
-  - an app-window host (`xdg_toplevel`)
-  - an HTML mail view (litehtml suggested)
-  - a multi-line rich text editor for compose
-  - swipe gestures
-  - a toast host with actions
-  - an async result → UI thread adaptor
 
 ## 8. Open questions and next steps
-1. **Decide:** mailnd vs hub (§2).
+
+**Done since this file was written:** the mailnd/hub decision (§2), the bridge's contacts surface,
+and a working contacts UI (`crates/noctmalia`) with tests. What it has never been run against is a
+real Thunderbird — only `tools/fake-bridge.py`. That is the next thing to do, and it needs Docker.
+
+1. **Run the rolodex against tbd.** `docker compose -f compose.yaml -f compose.ui.yaml up -d --build tbd`, then `cargo run -p noctmalia`. Watch for: `readOnly`/`remote` flags on the real books, whether `contacts.quickSearch` takes `(parentId, searchString)` or just the string on TB 155, and whether Thunderbird preserves `UID`/`X-` round-tripped through `contacts.update`.
 2. **Real account.** A throwaway Gmail covers what GreenMail can't: OAuth, Gmail labels, SMTP with OAuth, Google CalDAV/CardDAV. Bootstrap via `TBD_MODE=gui` on the Wayland machine (written, untested), or sign in with any TB 155 and copy the profile into the `tbd-profile` volume. I can't create provider accounts; they need phone or CAPTCHA verification.
 3. **Automatable real-ish server:** Stalwart in compose, for IMAP/SMTP/JMAP and probably CalDAV/CardDAV/OAuth. **Verify its feature list first.**
 4. **Untested rows in §6:** encryption (needs keys), reopening drafts, move/delete/archive, contact field read-back, CalDAV subscription, reply-subject query quirk.
@@ -186,6 +276,7 @@ docker compose --profile dev down                    # stop (add -v to wipe)
 - **Timeouts:** `tools/smoke.sh` has generous timeouts sized for emulation. It uses `date -v` (BSD) with a GNU `date -d` fallback, so it works on both.
 - **Migration:** the project directory isn't a git repo; `git init` before moving, or copy the whole tree. Docker volumes don't move: the profile is disposable in dev, and `smoke.sh` recreates state.
 - **Non-portable context:** Claude memory for this project lives on the Mac (`~/.claude/projects/...`). This file replaces it.
+- **Docker on this machine is not usable as-is:** the daemon is stopped and the desktop user is not in the `docker` group. `sudo usermod -aG docker $USER && sudo systemctl enable --now docker`, then log out and back in (or `newgrp docker`).
 
 ## 10. Sources
 - Thunderbird release notes: https://www.thunderbird.net/en-US/thunderbird/155.0/releasenotes/ (and 153.0, 154.0)

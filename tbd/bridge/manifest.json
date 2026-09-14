@@ -20,6 +20,7 @@
     "messagesImport",
     "messagesTags",
     "messagesTagsList",
+    "addressBooks",
     "nativeMessaging"
   ],
   "optional_permissions": [
