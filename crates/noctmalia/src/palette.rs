@@ -1,68 +1,59 @@
 //! Following the palette the user's Noctalia shell is actually running.
 //!
-//! noctalia-shell keeps its settings in `$XDG_STATE_HOME/noctalia/settings.toml` and its palettes as
-//! JSON with a `dark` and a `light` set of the sixteen roles. Reading them means a wallpaper or
-//! theme change carries into this window like it does into the rest of the desktop, which is the
-//! whole point of the design language — noctalia-iced's built-in palette is only a fallback.
+//! Noctalia resolves its colours from one of four sources — a built-in palette, one generated from
+//! the wallpaper, a community palette, or a custom one — and only the last two exist as files
+//! anyone else can read. Built-ins are compiled into the shell, and "pure black" re-anchors the
+//! whole dark surface ramp rather than darkening a single role, so reading `settings.toml` and the
+//! palette files it names cannot tell us what is actually on screen.
+//!
+//! What Noctalia does offer is templates: on every theme change it renders the palette it resolved
+//! through whatever template files are configured. So noctmalia ships one, registers it, and reads
+//! what comes out. That follows all four sources, and "pure black" along with them, because the
+//! shell has already done the resolving — there is nothing left for us to reimplement or to get
+//! out of step with when Noctalia changes.
+//!
+//! [`install`] writes both halves. Until it has run there is nothing to read, and the caller keeps
+//! noctalia-iced's built-in palette.
 
 use noctalia_iced::theme::{self, Palette};
 use noctalia_iced::widgets::parse_hex;
 use serde::Deserialize;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-/// How often the files are re-read. They change when a person changes their theme, so this is about
-/// feeling immediate, not about throughput.
+/// How often the rendered palette is re-read. It changes when a person changes their theme, so this
+/// is about feeling immediate, not about throughput.
 const POLL: Duration = Duration::from_secs(1);
 
-#[derive(Debug, Deserialize)]
-struct Settings {
-    theme: Option<ThemeSettings>,
-}
+/// The template Noctalia renders for us. Shipped in the binary so [`install`] needs nothing but the
+/// binary itself — a checkout that moves afterwards does not break the registration.
+const TEMPLATE: &str = include_str!("../assets/palette.tpl");
 
-#[derive(Debug, Deserialize)]
-struct ThemeSettings {
-    /// `custom`, `community`, or a built-in (which ships inside noctalia-shell, not on disk).
-    #[serde(default)]
-    source: String,
-    #[serde(default)]
-    custom_palette: String,
-    #[serde(default)]
-    community_palette: String,
-    /// `dark` or `light`.
-    #[serde(default)]
-    mode: String,
-}
+/// The name of the file we register ourselves in. Noctalia merges every `*.toml` in its config
+/// directory, so this sits beside its own settings rather than editing them.
+const REGISTRATION: &str = "noctmalia.toml";
 
-/// A palette file: the same sixteen roles under each mode.
-#[derive(Debug, Deserialize)]
-struct PaletteFile {
-    dark: Option<Roles>,
-    light: Option<Roles>,
-}
-
-/// Every role is optional: a palette that omits one keeps noctalia-iced's default for it rather
-/// than failing to load at all.
+/// The sixteen roles, as the template writes them. Every one is optional: a render that omits one
+/// keeps noctalia-iced's default for it rather than failing to load at all.
 #[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct Roles {
-    m_primary: Option<String>,
-    m_on_primary: Option<String>,
-    m_secondary: Option<String>,
-    m_on_secondary: Option<String>,
-    m_tertiary: Option<String>,
-    m_on_tertiary: Option<String>,
-    m_error: Option<String>,
-    m_on_error: Option<String>,
-    m_surface: Option<String>,
-    m_on_surface: Option<String>,
-    m_surface_variant: Option<String>,
-    m_on_surface_variant: Option<String>,
-    m_outline: Option<String>,
-    m_shadow: Option<String>,
-    m_hover: Option<String>,
-    m_on_hover: Option<String>,
+    primary: Option<String>,
+    on_primary: Option<String>,
+    secondary: Option<String>,
+    on_secondary: Option<String>,
+    tertiary: Option<String>,
+    on_tertiary: Option<String>,
+    error: Option<String>,
+    on_error: Option<String>,
+    surface: Option<String>,
+    on_surface: Option<String>,
+    surface_variant: Option<String>,
+    on_surface_variant: Option<String>,
+    outline: Option<String>,
+    shadow: Option<String>,
+    hover: Option<String>,
+    on_hover: Option<String>,
 }
 
 impl Roles {
@@ -70,22 +61,22 @@ impl Roles {
         let base = theme::DEFAULT_PALETTE;
         let color = |value: Option<String>, fallback| value.as_deref().and_then(parse_hex).unwrap_or(fallback);
         Palette {
-            primary: color(self.m_primary, base.primary),
-            on_primary: color(self.m_on_primary, base.on_primary),
-            secondary: color(self.m_secondary, base.secondary),
-            on_secondary: color(self.m_on_secondary, base.on_secondary),
-            tertiary: color(self.m_tertiary, base.tertiary),
-            on_tertiary: color(self.m_on_tertiary, base.on_tertiary),
-            error: color(self.m_error, base.error),
-            on_error: color(self.m_on_error, base.on_error),
-            surface: color(self.m_surface, base.surface),
-            on_surface: color(self.m_on_surface, base.on_surface),
-            surface_variant: color(self.m_surface_variant, base.surface_variant),
-            on_surface_variant: color(self.m_on_surface_variant, base.on_surface_variant),
-            outline: color(self.m_outline, base.outline),
-            shadow: color(self.m_shadow, base.shadow),
-            hover: color(self.m_hover, base.hover),
-            on_hover: color(self.m_on_hover, base.on_hover),
+            primary: color(self.primary, base.primary),
+            on_primary: color(self.on_primary, base.on_primary),
+            secondary: color(self.secondary, base.secondary),
+            on_secondary: color(self.on_secondary, base.on_secondary),
+            tertiary: color(self.tertiary, base.tertiary),
+            on_tertiary: color(self.on_tertiary, base.on_tertiary),
+            error: color(self.error, base.error),
+            on_error: color(self.on_error, base.on_error),
+            surface: color(self.surface, base.surface),
+            on_surface: color(self.on_surface, base.on_surface),
+            surface_variant: color(self.surface_variant, base.surface_variant),
+            on_surface_variant: color(self.on_surface_variant, base.on_surface_variant),
+            outline: color(self.outline, base.outline),
+            shadow: color(self.shadow, base.shadow),
+            hover: color(self.hover, base.hover),
+            on_hover: color(self.on_hover, base.on_hover),
         }
     }
 }
@@ -94,70 +85,118 @@ fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
+/// Ours: the template we ask Noctalia to render, and the file it renders to. Generated state rather
+/// than anything a person edits, so it belongs under the state directory.
 fn state_dir() -> Option<PathBuf> {
     match std::env::var_os("XDG_STATE_HOME") {
-        Some(path) => Some(PathBuf::from(path).join("noctalia")),
-        None => Some(home()?.join(".local/state/noctalia")),
+        Some(path) => Some(PathBuf::from(path).join("noctmalia")),
+        None => Some(home()?.join(".local/state/noctmalia")),
     }
 }
 
-fn config_dir() -> Option<PathBuf> {
+/// Noctalia's, where the registration goes.
+fn noctalia_config_dir() -> Option<PathBuf> {
     match std::env::var_os("XDG_CONFIG_HOME") {
         Some(path) => Some(PathBuf::from(path).join("noctalia")),
         None => Some(home()?.join(".config/noctalia")),
     }
 }
 
-/// The palette file the settings point at, if it is one that lives on disk.
-fn palette_path(settings: &ThemeSettings, state: &Path, config: &Path) -> Option<PathBuf> {
-    match settings.source.as_str() {
-        "custom" if !settings.custom_palette.is_empty() => {
-            Some(config.join("palettes").join(format!("{}.json", settings.custom_palette)))
-        }
-        // Community palette names are stored URL-encoded, because they come from a catalogue where
-        // they may contain spaces.
-        "community" if !settings.community_palette.is_empty() => {
-            Some(state.join("community-palettes").join(format!("{}.json", encode(&settings.community_palette))))
-        }
-        // Built-in palettes ship inside noctalia-shell; there is nothing to read.
-        _ => None,
-    }
+/// Where Noctalia writes the palette it resolved.
+pub fn rendered_path() -> Option<PathBuf> {
+    Some(state_dir()?.join("palette.json"))
 }
 
-/// Percent-encoding, matching how noctalia names the files it caches.
-fn encode(name: &str) -> String {
-    let mut out = String::with_capacity(name.len());
-    for byte in name.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
-            out.push(byte as char);
-        } else {
-            out.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    out
-}
-
-/// The palette Noctalia is running, or `None` if it cannot be read — a built-in theme, a shell that
-/// is not installed, a file we do not understand. The caller keeps noctalia-iced's default.
+/// The palette Noctalia is running, or `None` if it cannot be read — [`install`] has not run, the
+/// shell is not installed, a file we do not understand. The caller keeps noctalia-iced's default.
 pub fn load() -> Option<Palette> {
-    load_from(&state_dir()?, &config_dir()?)
+    let rendered = std::fs::read_to_string(rendered_path()?).ok()?;
+    let roles: Roles = serde_json::from_str(&rendered).ok()?;
+    Some(roles.into_palette())
 }
 
-/// [`load`] against explicit directories, so it can be tested without a Noctalia install.
-fn load_from(state: &Path, config: &Path) -> Option<Palette> {
-    let settings: Settings = toml::from_str(&std::fs::read_to_string(state.join("settings.toml")).ok()?).ok()?;
-    let settings = settings.theme?;
+/// What [`install`] did, for the caller to report.
+pub struct Installed {
+    pub template: PathBuf,
+    pub registration: PathBuf,
+    pub rendered: PathBuf,
+    /// Whether Noctalia rendered it there and then. When it did not — the shell is not running, or
+    /// not installed — the next theme change still will.
+    pub applied: bool,
+}
 
-    let path = palette_path(&settings, state, config)?;
-    let file: PaletteFile = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
-    let roles = if settings.mode == "light" { file.light } else { file.dark };
-    Some(roles.unwrap_or_default().into_palette())
+/// Registers the template with Noctalia, so it starts rendering the palette where [`load`] reads.
+///
+/// Both files are ours: the template under our own state directory, and a `noctmalia.toml` beside
+/// Noctalia's settings rather than inside them. Removing the two undoes this completely.
+pub fn install() -> Result<Installed, String> {
+    let state = state_dir().ok_or("no home directory to install into")?;
+    let config = noctalia_config_dir().ok_or("no home directory to install into")?;
+
+    let template = state.join("palette.tpl");
+    let rendered = state.join("palette.json");
+    let registration = config.join(REGISTRATION);
+
+    let write = |path: &PathBuf, contents: &str| -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
+        }
+        std::fs::write(path, contents).map_err(|error| format!("{}: {error}", path.display()))
+    };
+
+    write(&template, TEMPLATE)?;
+
+    // Absolute paths, resolved now: Noctalia expands `$XDG_*` in template paths, but those are only
+    // set for some sessions, and a path that silently fails to expand is worse than a long one.
+    let entry = format!(
+        "# Written by `noctmalia --install-palette-template`. Delete this file and\n\
+         # {} to undo it.\n\
+         #\n\
+         # Noctalia renders this on every theme change, which is how noctmalia follows the palette\n\
+         # you are running — including built-in palettes and \"pure black\", neither of which can be\n\
+         # read back out of settings.toml.\n\
+         \n\
+         [theme.templates.user.noctmalia]\n\
+         input_path = \"{}\"\n\
+         output_path = \"{}\"\n",
+        template.display(),
+        template.display(),
+        rendered.display(),
+    );
+    write(&registration, &entry)?;
+
+    // Render it now rather than leaving a first run on the fallback palette until something else
+    // changes the theme. The reload comes first: a running shell read its config at startup and
+    // does not know this file exists yet, so asking it to apply templates would only re-render the
+    // ones it already had. A shell that is not running has nothing to tell; that is not a failure.
+    let tell = |command: &str| {
+        let _ = std::process::Command::new("noctalia")
+            .args(["msg", command])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    };
+    tell("config-reload");
+    tell("templates-apply");
+
+    // Whether it worked is whether the file appears, not whether the command exited zero: it
+    // reports on applying every configured template, not on ours in particular. The shell
+    // acknowledges the message and renders afterwards, so this waits rather than asking once — a
+    // second of patience here is the difference between telling the truth and telling someone to
+    // go and change their theme for no reason.
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while !rendered.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let applied = rendered.exists();
+
+    Ok(Installed { template, registration, rendered, applied })
 }
 
 /// Palette changes, as they happen.
 ///
-/// Polling beats an inotify watch here: the files are small, a second of latency is invisible, and
-/// polling is immune to the write-to-temp-and-rename that anything editing config files does. The
+/// Polling beats an inotify watch here: the file is small, a second of latency is invisible, and
+/// polling is immune to the write-to-temp-and-rename that anything writing files this way does. The
 /// thread only sends when the palette actually differs, so an unchanged theme costs no redraws.
 pub struct Changes(mpsc::UnboundedReceiver<Palette>);
 
@@ -199,110 +238,78 @@ mod tests {
     use super::*;
 
     #[test]
-    fn maps_the_role_names_a_noctalia_palette_file_uses() {
-        let file = r##"{"dark":{"mPrimary":"#A7C080","mSurface":"#232A2E","mOnSurface":"#859289"}}"##;
-        let parsed: PaletteFile = serde_json::from_str(file).expect("parse");
-        let palette = parsed.dark.expect("dark").into_palette();
+    fn maps_the_role_names_the_template_writes() {
+        let rendered = r##"{
+          "_comment": "ignored",
+          "primary": "#A7C080",
+          "surface": "#232A2E",
+          "on_surface": "#859289"
+        }"##;
+        let parsed: Roles = serde_json::from_str(rendered).expect("parse");
+        let palette = parsed.into_palette();
         assert_eq!(palette.primary, parse_hex("#A7C080").unwrap());
         assert_eq!(palette.surface, parse_hex("#232A2E").unwrap());
-        // A role the file leaves out keeps the built-in value rather than going black.
+        // A role the render leaves out keeps the built-in value rather than going black.
         assert_eq!(palette.outline, theme::DEFAULT_PALETTE.outline);
     }
 
+    /// The point of the whole exercise: a "pure black" render is followed exactly, with no ramp
+    /// arithmetic of our own to drift from Noctalia's.
     #[test]
-    fn community_palette_names_are_encoded_the_way_noctalia_caches_them() {
-        assert_eq!(encode("Everforest Alt"), "Everforest%20Alt");
-        assert_eq!(encode("Everforest"), "Everforest");
-    }
-
-    #[test]
-    fn a_builtin_theme_has_no_file_to_read() {
-        let builtin = ThemeSettings {
-            source: "builtin".into(),
-            custom_palette: String::new(),
-            community_palette: String::new(),
-            mode: "dark".into(),
-        };
-        // Built-ins live inside noctalia-shell, so there is nothing to follow and the caller keeps
-        // noctalia-iced's own palette.
-        assert!(palette_path(&builtin, Path::new("/state"), Path::new("/config")).is_none());
-    }
-
-    /// A Noctalia install, as far as this module is concerned.
-    fn install(directory: &Path, settings: &str, palette_file: &str) -> (PathBuf, PathBuf) {
-        let state = directory.join("state");
-        let config = directory.join("config");
-        std::fs::create_dir_all(config.join("palettes")).expect("config");
-        std::fs::create_dir_all(state.join("community-palettes")).expect("state");
-        std::fs::write(state.join("settings.toml"), settings).expect("settings");
-        std::fs::write(config.join("palettes").join("Mine.json"), palette_file).expect("palette");
-        std::fs::write(state.join("community-palettes").join("Some%20Palette.json"), palette_file).expect("palette");
-        (state, config)
-    }
-
-    fn scratch(name: &str) -> PathBuf {
-        let directory = std::env::temp_dir().join(format!("noctmalia-palette-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&directory);
-        directory
-    }
-
-    const PALETTE: &str = r##"{
-      "dark":  {"mPrimary": "#A7C080", "mSurface": "#232A2E"},
-      "light": {"mPrimary": "#434F55", "mSurface": "#9DA9A0"}
-    }"##;
-
-    #[test]
-    fn reads_a_custom_palette_in_the_mode_the_settings_name() {
-        let directory = scratch("custom");
-        let settings = "config_version = 14
-
-[theme]
-source = \"custom\"
-custom_palette = \"Mine\"
-mode = \"dark\"
-";
-        let (state, config) = install(&directory, settings, PALETTE);
-
-        let dark = load_from(&state, &config).expect("a palette");
-        assert_eq!(dark.primary, parse_hex("#A7C080").unwrap());
-        assert_eq!(dark.surface, parse_hex("#232A2E").unwrap());
-
-        let light = settings.replace("mode = \"dark\"", "mode = \"light\"");
-        std::fs::write(state.join("settings.toml"), light).expect("settings");
-        let light = load_from(&state, &config).expect("a palette");
-        assert_eq!(light.surface, parse_hex("#9DA9A0").unwrap());
-
-        let _ = std::fs::remove_dir_all(&directory);
+    fn a_pure_black_render_is_taken_at_its_word() {
+        let rendered = r##"{"surface": "#000000", "surface_variant": "#333A3E"}"##;
+        let palette: Roles = serde_json::from_str(rendered).expect("parse");
+        let palette = palette.into_palette();
+        assert_eq!(palette.surface, parse_hex("#000000").unwrap());
+        assert_eq!(palette.surface_variant, parse_hex("#333A3E").unwrap());
     }
 
     #[test]
-    fn reads_a_community_palette_under_its_encoded_name() {
-        let directory = scratch("community");
-        let settings = "[theme]
-source = \"community\"
-community_palette = \"Some Palette\"
-mode = \"dark\"
-";
-        let (state, config) = install(&directory, settings, PALETTE);
-        assert_eq!(load_from(&state, &config).expect("a palette").primary, parse_hex("#A7C080").unwrap());
-        let _ = std::fs::remove_dir_all(&directory);
+    fn the_shipped_template_names_every_role() {
+        // The template is what fills `Roles`, so a role missing from it is a role that silently
+        // keeps the built-in colour on every desktop.
+        for role in [
+            "primary",
+            "on_primary",
+            "secondary",
+            "on_secondary",
+            "tertiary",
+            "on_tertiary",
+            "error",
+            "on_error",
+            "surface",
+            "on_surface",
+            "surface_variant",
+            "on_surface_variant",
+            "outline",
+            "shadow",
+            "hover",
+            "on_hover",
+        ] {
+            assert!(TEMPLATE.contains(&format!("\"{role}\":")), "template does not write {role}");
+        }
+    }
+
+    /// Whatever the template writes has to parse as the roles we read back.
+    #[test]
+    fn the_shipped_template_renders_into_roles() {
+        let mut rendered = String::new();
+        let mut rest = TEMPLATE;
+        while let Some(start) = rest.find("{{") {
+            rendered.push_str(&rest[..start]);
+            rendered.push_str("#123456");
+            let end = rest[start..].find("}}").expect("closed placeholder") + start + 2;
+            rest = &rest[end..];
+        }
+        rendered.push_str(rest);
+
+        let roles: Roles = serde_json::from_str(&rendered).expect("the template renders valid JSON");
+        assert_eq!(roles.into_palette().primary, parse_hex("#123456").unwrap());
     }
 
     #[test]
-    fn no_noctalia_install_is_not_an_error() {
-        assert!(load_from(Path::new("/nonexistent/state"), Path::new("/nonexistent/config")).is_none());
-    }
-
-    #[test]
-    fn settings_naming_a_palette_that_is_not_there_fall_back() {
-        let directory = scratch("missing");
-        let settings = "[theme]
-source = \"custom\"
-custom_palette = \"Gone\"
-mode = \"dark\"
-";
-        let (state, config) = install(&directory, settings, PALETTE);
-        assert!(load_from(&state, &config).is_none());
-        let _ = std::fs::remove_dir_all(&directory);
+    fn nothing_rendered_yet_is_not_an_error() {
+        let roles: Result<Roles, _> = serde_json::from_str("not json");
+        assert!(roles.is_err());
     }
 }

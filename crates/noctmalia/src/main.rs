@@ -15,10 +15,17 @@ const APP_ID: &str = "dev.noctalia.Noctmalia";
 
 pub const USAGE: &str = "\
 usage: noctmalia [--socket PATH]
+       noctmalia --install-palette-template
 
   --socket PATH  where to listen for Thunderbird's shim
                  (default: $NOCTMALIA_BRIDGE_SOCKET, else
                  $XDG_RUNTIME_DIR/noctmalia/bridge.sock)
+
+  --install-palette-template
+                 ask Noctalia to render its palette where this app can read it,
+                 so the window follows your theme. Once per machine; see the
+                 `palette` module for what it writes and how to undo it.
+
   --help         this
 ";
 
@@ -32,6 +39,31 @@ fn default_socket() -> PathBuf {
     run.join("noctmalia").join("bridge.sock")
 }
 
+/// Registers our template with Noctalia. Split out of `main` because it is a one-shot: it writes
+/// two files, says what it did, and never opens a window.
+fn install_palette_template() -> ExitCode {
+    match palette::install() {
+        Ok(done) => {
+            println!("wrote {}", done.template.display());
+            println!("wrote {}", done.registration.display());
+            if done.applied {
+                println!("Noctalia rendered {}", done.rendered.display());
+            } else {
+                println!(
+                    "Noctalia is not running, so nothing is rendered yet — it will write\n\
+                     {} on the next theme change.",
+                    done.rendered.display()
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("noctmalia: cannot install the palette template: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let mut arguments = std::env::args().skip(1);
     let mut socket = default_socket();
@@ -41,6 +73,7 @@ fn main() -> ExitCode {
                 println!("{USAGE}");
                 return ExitCode::SUCCESS;
             }
+            "--install-palette-template" => return install_palette_template(),
             "--socket" => match arguments.next() {
                 Some(path) => socket = PathBuf::from(path),
                 None => {
@@ -75,7 +108,10 @@ fn main() -> ExitCode {
             eprintln!("noctmalia: following the Noctalia palette");
             theme::set_palette(found);
         }
-        None => eprintln!("noctmalia: no Noctalia palette found, using the built-in one"),
+        None => eprintln!(
+            "noctmalia: no Noctalia palette rendered yet, using the built-in one\n\
+             noctmalia: run `noctmalia --install-palette-template` to follow your theme"
+        ),
     }
 
     let window = chrome::settings(app::WINDOW, app::WINDOW_MIN, APP_ID);
