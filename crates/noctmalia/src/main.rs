@@ -4,9 +4,8 @@
 //! unix socket, so this process is the listener. With Thunderbird in a container, bind-mount the
 //! socket's directory into it (`docs/findings.md` §9).
 
-use iced::Size;
 use noctalia_iced::{chrome, theme};
-use noctmalia::app::Rolodex;
+use noctmalia::app::{self, Rolodex};
 use noctmalia::{font, palette};
 use noctmalia_bridge::Bridge;
 use std::path::PathBuf;
@@ -79,7 +78,7 @@ fn main() -> ExitCode {
         None => eprintln!("noctmalia: no Noctalia palette found, using the built-in one"),
     }
 
-    let window = chrome::settings(Size::new(1100.0, 720.0), Size::new(760.0, 480.0), APP_ID);
+    let window = chrome::settings(app::WINDOW, app::WINDOW_MIN, APP_ID);
     let application = iced::application(move || Rolodex::new(bridge.clone()), Rolodex::update, Rolodex::view)
         .title(Rolodex::title)
         .theme(Rolodex::theme)
