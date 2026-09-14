@@ -22,6 +22,7 @@
             rustfmt
             clippy
             pkg-config
+            just # the justfile, for anyone who does not have it on the host
             python3 # tools/fake-bridge.py, which the contacts tests drive
           ];
 
