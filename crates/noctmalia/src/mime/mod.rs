@@ -57,6 +57,14 @@ impl Part {
     fn is_multipart(&self) -> bool {
         self.media_type().starts_with("multipart/")
     }
+
+    /// Whether this part is nothing but its `parts` — `multipart/*`, or a whole embedded message
+    /// (`message/rfc822`: a forward, or the original beneath a bounce). Real mail nests these where
+    /// the GreenMail fixture never did; treating one as a leaf left it with no body and an
+    /// attachment labelled by its raw content type that nothing can actually fetch.
+    fn is_container(&self) -> bool {
+        self.is_multipart() || self.media_type() == "message/rfc822"
+    }
 }
 
 /// What the letter arrived as. Kept so the reader can be told, and so the raw-source hatch knows
@@ -145,7 +153,7 @@ fn pick(part: &Part) -> Option<&Part> {
             .then_some(part)
             .filter(|part| part.name.is_none());
     }
-    if !part.is_multipart() {
+    if !part.is_container() {
         return None;
     }
 
@@ -213,7 +221,7 @@ pub fn attachments(root: &Part) -> Vec<Attachment> {
 }
 
 fn collect(part: &Part, letter: Option<&str>, found: &mut Vec<Attachment>) {
-    if part.is_multipart() {
+    if part.is_container() {
         for child in &part.parts {
             collect(child, letter, found);
         }
@@ -307,6 +315,27 @@ mod tests {
         assert_eq!(found.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["logo.png", "invoice.pdf"]);
         assert_eq!(found[1].part_name, "2");
         assert_eq!(found[1].human_size(), "50 kB");
+    }
+
+    /// A forward or a bounce wraps the original message whole, headers and all, as
+    /// `message/rfc822` rather than `multipart/*` — real mail nests this where the fixture never
+    /// did, and it used to leave the letter empty with an unfetchable "attachment" in its place.
+    #[test]
+    fn a_letter_inside_a_forwarded_message_is_still_the_letter() {
+        let message = part(json!({
+            "contentType": "multipart/mixed", "partName": "",
+            "parts": [{"contentType": "message/rfc822", "partName": "1", "parts": [
+                {"contentType": "multipart/alternative", "partName": "1.1", "parts": [
+                    {"contentType": "text/plain", "partName": "1.1.1", "body": "The original letter, written out at some \
+                        length by a person who had something to say and said it in plain text, as people do."},
+                    {"contentType": "text/html", "partName": "1.1.2", "body": "<p>marketing</p>"},
+                ]},
+                {"contentType": "application/pdf", "partName": "1.2", "name": "invoice.pdf", "size": 1024},
+            ]}]
+        }));
+        assert!(body(&message).markdown.starts_with("The original letter"));
+        let found = attachments(&message);
+        assert_eq!(found.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["invoice.pdf"]);
     }
 
     #[test]
