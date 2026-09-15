@@ -2,6 +2,7 @@
 
 Date: 2026-09-14
 Depends on: `command-palette-plan.md` (hard — fronts the same command registry)
+Status: **Shipped 2026-09-15**, verified against the real running app (`just` + `noctmalia-ctl.py`), not just the test suite.
 
 ---
 
@@ -111,3 +112,8 @@ parallel with them once the palette plan lands.
 - Whatever stdout format `noctmalia-ctl.py` commits to becomes something scripts depend on;
   changing it later is a breaking change the same way renaming `g c` was — pick something you'd be
   fine keeping.
+- **Observed against the real app, 2026-09-15:** mail and people both expose a command labeled
+  "Search", and the socket's `name` is the label — `run "Search"` reaches whichever one
+  `all_commands()` happens to list first (mail), never people's. Harmless today since nothing
+  exposed collides in a way that matters, but a real fix (a surface-prefixed name, mirroring the
+  palette's own `m`/`p`/`k`) is worth doing before exposing more.

@@ -11,7 +11,7 @@ landable and reviewable, in the shape `docs/mail-plan.md` already established fo
 | 2 | [`command-palette-plan.md`](command-palette-plan.md) | None | Shipped 2026-09-15 |
 | 3 | [`config-plan.md`](config-plan.md) | 2 (soft) | Shipped 2026-09-15 |
 | 4 | [`context-commands-plan.md`](context-commands-plan.md) | 3 (hard) | Shipped 2026-09-15 |
-| 5 | [`scripting-socket-plan.md`](scripting-socket-plan.md) | 2 (hard) | Not started |
+| 5 | [`scripting-socket-plan.md`](scripting-socket-plan.md) | 2 (hard) | Shipped 2026-09-15 |
 | 6 | [`mode-visual-plan.md`](mode-visual-plan.md) | 2 (soft) | Not started |
 
 ```
