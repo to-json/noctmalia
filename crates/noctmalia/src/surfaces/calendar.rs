@@ -536,6 +536,28 @@ impl Calendar {
         Task::perform(calendar::calendars(shell.bridge()), Message::Cals)
     }
 
+    /// The keybound actions worth finding by name — `docs/command-palette-plan.md` §3.2. Pure
+    /// stepping (`Binding::Next`/`Prev`) is left out: it exists to be repeated, not looked up.
+    pub fn commands(&self) -> Vec<crate::commands::Entry<Message>> {
+        use crate::commands::Entry;
+        vec![
+            Entry::new("Jump to today", Some("t"), Message::Today),
+            Entry::new("New event", Some("n"), Message::New(self.anchor, Some(9))),
+            Entry::new("Month view", Some("m"), Message::View(ViewKind::Month)),
+            Entry::new("Week view", Some("w"), Message::View(ViewKind::Week)),
+            Entry::new("Day view", Some("d"), Message::View(ViewKind::Day)),
+            Entry::new("Agenda view", Some("a"), Message::View(ViewKind::Agenda)),
+            Entry::new("Save event", Some("<C-CR>"), Message::Save),
+            Entry::new("Refresh", Some("<C-r>"), Message::Refresh),
+        ]
+    }
+
+    /// The currently loaded rows, as jump targets for quick-open —
+    /// `docs/command-palette-plan.md` §4.2.
+    pub fn quick_items(&self) -> Vec<crate::commands::Entry<Message>> {
+        self.items.iter().map(|item| crate::commands::Entry::new(item.event.summary.clone(), None, Message::Open(item.id.clone()))).collect()
+    }
+
     pub fn notify(&mut self, name: &str, data: &Value, shell: &Shell) -> Task<Message> {
         if name == "calendar.items.onAlarm" {
             // A reminder firing doesn't change what's in a folder or a range — nothing here

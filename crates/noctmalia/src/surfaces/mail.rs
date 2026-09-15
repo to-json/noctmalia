@@ -515,6 +515,64 @@ impl Mail {
         ])
     }
 
+    /// The keybound actions worth finding by name — `docs/command-palette-plan.md` §3.2. Pure
+    /// cursor movement and pane focus (`Binding::Down`/`Up`/`Top`/`Bottom`/`HalfDown`/`HalfUp`/
+    /// `PageDown`/`PageUp`/`Open`/`Back`/`Fold`) is left out: it exists to be repeated or held,
+    /// not looked up by name. `Go to <folder>` only appears for a folder this account actually
+    /// has.
+    pub fn commands(&self) -> Vec<crate::commands::Entry<Message>> {
+        use crate::commands::Entry;
+        let mut entries = vec![
+            Entry::new("Mark", Some("x"), Message::Mark),
+            Entry::new("Flag", Some("s"), Message::Flag),
+            Entry::new("Mark unread", Some("N"), Message::Unread),
+            Entry::new("Next unread", Some("n"), Message::NextUnread),
+            Entry::new("Archive", Some("e"), Message::Archive),
+            Entry::new("Delete", Some("d"), Message::Discard),
+            Entry::new("Undo", Some("u"), Message::Undo),
+            Entry::new("Compose", Some("m"), Message::Compose(None)),
+            Entry::new("Reply", Some("r"), Message::Compose(Some(Reply::Sender))),
+            Entry::new("Reply all", Some("R"), Message::Compose(Some(Reply::All))),
+            Entry::new("Forward", Some("f"), Message::Compose(Some(Reply::Forward))),
+            Entry::new("Search", Some("/"), Message::Search),
+            Entry::new("Show raw source", Some("\\"), Message::Show(Showing::Source)),
+            Entry::new("Show headers", Some("H"), Message::Show(Showing::Headers)),
+            Entry::new("Show security surface", Some("!"), Message::Show(Showing::Security)),
+            Entry::new("Open elsewhere", Some("O"), Message::External),
+            Entry::new("Propose a screening rule", Some("S"), Message::Screen),
+            Entry::new("Refresh", Some("<C-r>"), Message::Refresh),
+        ];
+        for (label, purpose, hint) in [
+            ("Go to Inbox", "inbox", "g i"),
+            ("Go to Sent", "sent", "g s"),
+            ("Go to Drafts", "drafts", "g d"),
+            ("Go to Archives", "archives", "g a"),
+            ("Go to Trash", "trash", "g t"),
+        ] {
+            if let Some(id) = self.folder_for(purpose) {
+                entries.push(Entry::new(label, Some(hint), Message::OpenFolder(id)));
+            }
+        }
+        entries
+    }
+
+    /// The currently loaded rows, as jump targets for quick-open —
+    /// `docs/command-palette-plan.md` §4.2. Only what has already paged in; a folder's own `/`
+    /// filter is still the way to reach a message quick-open hasn't loaded yet.
+    pub fn quick_items(&self) -> Vec<crate::commands::Entry<Message>> {
+        self.headers
+            .iter()
+            .map(|header| {
+                let label = if header.author.is_empty() {
+                    header.subject.clone()
+                } else {
+                    format!("{} — {}", header.subject, header.author)
+                };
+                crate::commands::Entry::new(label, None, Message::Select(header.id))
+            })
+            .collect()
+    }
+
     /// A forwarded Thunderbird event.
     ///
     /// New mail and a folder's counts changing are worth acting on; a message being updated by us

@@ -621,6 +621,29 @@ impl People {
         Task::perform(people::books(shell.bridge()), Message::Books)
     }
 
+    /// The keybound actions worth finding by name — `docs/command-palette-plan.md` §3.2. Pure
+    /// cursor movement (`Binding::Down`/`Up`/`Top`/`Bottom`) is left out: it exists to be
+    /// repeated, not looked up.
+    pub fn commands(&self) -> Vec<crate::commands::Entry<Message>> {
+        use crate::commands::Entry;
+        vec![
+            Entry::new("Search", Some("/"), Message::Search),
+            Entry::new("New contact", Some("n"), Message::New),
+            Entry::new("Edit contact", Some("e"), Message::Edit),
+            Entry::new("Save", Some("<C-s>"), Message::Save),
+            Entry::new("Delete contact", Some("d"), Message::AskDelete),
+        ]
+    }
+
+    /// The currently loaded rows, as jump targets for quick-open —
+    /// `docs/command-palette-plan.md` §4.2.
+    pub fn quick_items(&self) -> Vec<crate::commands::Entry<Message>> {
+        self.contacts
+            .iter()
+            .map(|contact| crate::commands::Entry::new(contact.card.display_name(), None, Message::Select(contact.id.clone())))
+            .collect()
+    }
+
     /// A forwarded Thunderbird event. Any address-book change invalidates the list; a rolodex is
     /// small, and reloading it beats patching rows from payloads that only sometimes carry the
     /// whole contact.
