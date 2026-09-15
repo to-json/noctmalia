@@ -116,4 +116,4 @@ parallel with them once the palette plan lands.
   "Search", and the socket's `name` is the label — `run "Search"` reaches whichever one
   `all_commands()` happens to list first (mail), never people's. Harmless today since nothing
   exposed collides in a way that matters, but a real fix (a surface-prefixed name, mirroring the
-  palette's own `m`/`p`/`k`) is worth doing before exposing more.
+  palette's own `m`/`c`/`p`) is worth doing before exposing more.

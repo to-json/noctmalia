@@ -31,9 +31,10 @@ shape, not new dispatch architecture.
 widget, no fuzzy-match code, nothing named `search_picker` or `keybind_recorder` anywhere in the
 sibling repo (`design.md`'s sketch was never built). Both are new.
 
-Surface prefixes: `m` (Mail), `p` (People — see Stream 1), `k` (Calendar, since `c` is taken).
-Typing a scope letter followed by a query narrows to that surface's commands or data; a bare query
-searches the current surface's commands/data with no prefix, per want.md.
+Surface prefixes: `m` (Mail), `c` (Calendar), `p` (People — see Stream 1, which frees `c` from
+Contacts precisely so Calendar can have its own natural letter instead of `k`). Typing a scope
+letter followed by a query narrows to that surface's commands or data; a bare query searches the
+current surface's commands/data with no prefix, per want.md.
 
 ## Stream 1: Rename Contacts → People
 
@@ -48,10 +49,13 @@ in interview: the full rename, not a palette-only alias.
 titlebar text "Contacts" → "People", switcher hint `Contacts · g c` → `People · g p`.
 
 ### 1.2 Decide the `g` binding
-`g c` currently means Contacts; moving it to `g p` frees `c` for something else (nothing claims it
-yet) but breaks a binding someone may have already built muscle memory for. Move to `g p`, keep
-`g c` as a silent alias for one release, drop it once the palette makes discovery cheap enough that
-aliases aren't load-bearing.
+The whole reason for this rename: Calendar wants `c`, its own natural letter, and Contacts was
+sitting on it. So `g c` moves to Calendar and People gets `g p` — not `g c` kept as People's new
+home with Calendar left on the `g k` it was already using. **Got backward on first implementation
+pass** — an initial cut kept `g c`/prefix `c` pointing at People with a "kept as an alias" note and
+put Calendar on `g k`/prefix `k`, exactly the assignment this rename was supposed to fix. Corrected
+2026-09-15: `g c` → Calendar, `g p` → People, no alias kept — this is pre-release, single-developer
+software, and an alias for an internal rename that was wrong for about a day serves no one.
 
 ### 1.3 Don't retcon `mail-plan.md`
 `docs/mail-plan.md` is a historical build record ("**It has been built.**") of the app as it was
@@ -60,8 +64,8 @@ own header already uses for superseding decisions — rather than rewriting its 
 say "People."
 
 ### 1.4 Test
-`tests/contacts.rs` → rename/keep, assert the titlebar and switcher hint say "People", assert both
-`g p` and (temporarily) `g c` switch surfaces.
+`tests/contacts.rs` → rename/keep, assert the titlebar and switcher hint say "People", assert
+`g p` switches to People and `g c` switches to Calendar.
 
 ## Stream 2: The fuzzy-match core
 
@@ -122,12 +126,12 @@ into auditing every `on_press` in the app.
 
 ### 4.1 Command palette (verbs)
 `ctrl+k` opens `Picker<Command>` seeded with the current surface's commands unprefixed. Typing `m `,
-`p `, or `k ` at the start of the query re-seeds the list from that surface's commands instead —
+`c `, or `p ` at the start of the query re-seeds the list from that surface's commands instead —
 implemented as a prefix strip before the fuzzy match runs, not a mode switch.
 
 ### 4.2 Quick-open (nouns)
 `ctrl+p` opens `Picker<Item>` over whatever the current surface's rows are (messages, people,
-events); same `m`/`p`/`k` prefix convention jumps to the other surfaces' data. Selecting a row
+events); same `m`/`c`/`p` prefix convention jumps to the other surfaces' data. Selecting a row
 navigates to it and switches surface if needed.
 
 ### 4.3 Test
@@ -148,4 +152,7 @@ an acknowledged, bounded gap for however long Plan 6 is deferred, not an oversig
   revisiting it after real use, not a one-shot implementation.
 - `Picker<T>` risks growing surface-specific special cases across two call sites; keep it generic
   and push all surface knowledge into the closures each call site provides.
-- The `g c` → `g p` alias period is a real UX inconsistency window; keep it short.
+- Getting the letter assignment backward on the first pass (§1.2) cost nothing this time because
+  nothing outside this session depended on it yet — the same mistake against a binding real users
+  had muscle memory for would need the alias period this plan originally drafted for exactly that
+  reason.

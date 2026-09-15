@@ -1,5 +1,10 @@
 # noctmalia — the mail surface
 
+> **2026-09-15:** the Contacts surface this document describes is now called People —
+> `docs/command-palette-plan.md` Stream 1, so Calendar can have its own natural `g c` / `c` instead
+> of splitting the letter with Contacts. This document is a historical build record of what shipped
+> at the time, so its own "Contacts" prose stays as written rather than being retrofitted.
+
 A plan, against `notes.md`. It supersedes the mail half of `docs/design.md`: the HTML problem is
 answered differently below, and the build order is re-cut around what the bridge already does.
 

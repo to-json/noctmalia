@@ -17,9 +17,10 @@ use noctalia_iced::keymap::Keymap;
 /// switcher is glyphs in the titlebar rather than a column of screen down the left.
 ///
 /// Called `People` rather than `Contacts` throughout — `docs/command-palette-plan.md` Stream 1 —
-/// so the palette's surface-prefix letters (`m`/`p`/`k`) don't have `c` doing double duty for both
-/// Contacts and Calendar. `docs/mail-plan.md`, a historical build record, keeps saying "Contacts";
-/// see its 2026-09-15 addendum rather than that document's own prose being rewritten.
+/// so `c` is free for Calendar's own natural letter instead of Contacts and Calendar fighting
+/// over it: `g c` and the palette prefix `c` go to Calendar, and People gets `g p`/`p`.
+/// `docs/mail-plan.md`, a historical build record, keeps saying "Contacts"; see its 2026-09-15
+/// addendum rather than that document's own prose being rewritten.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Surface {
     Mail,
@@ -54,7 +55,7 @@ impl Surface {
         match self {
             Surface::Mail => "Mail  ·  g m",
             Surface::People => "People  ·  g p",
-            Surface::Calendar => "Calendar  ·  g k",
+            Surface::Calendar => "Calendar  ·  g c",
         }
     }
 
@@ -64,7 +65,7 @@ impl Surface {
         match self {
             Surface::Mail => 'm',
             Surface::People => 'p',
-            Surface::Calendar => 'k',
+            Surface::Calendar => 'c',
         }
     }
 }
@@ -87,13 +88,6 @@ pub enum Pressed<M> {
 
 /// The bindings every surface carries, whatever else it binds. Added to each surface's own table so
 /// there is a single table per surface and therefore a single half-typed sequence in the window.
-///
-/// `gc` is a silent alias for `gp`, kept for one release since People was Contacts until
-/// `docs/command-palette-plan.md` Stream 1 — drop it once the palette makes discovery cheap enough
-/// that the old binding isn't load-bearing.
 pub fn switches<A: Clone>(keys: Keymap<A>, go: impl Fn(Surface) -> A) -> Keymap<A> {
-    keys.bind("gm", go(Surface::Mail))
-        .bind("gp", go(Surface::People))
-        .bind("gc", go(Surface::People))
-        .bind("gk", go(Surface::Calendar))
+    keys.bind("gm", go(Surface::Mail)).bind("gc", go(Surface::Calendar)).bind("gp", go(Surface::People))
 }

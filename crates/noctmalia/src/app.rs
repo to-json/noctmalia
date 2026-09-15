@@ -780,6 +780,22 @@ mod tests {
         words.clone()
     }
 
+    /// Locks in a correction: an earlier pass had this backward, keeping People on `c` (aliased
+    /// from Contacts) and leaving Calendar on `k` — exactly what the People rename was supposed to
+    /// fix. Calendar gets its own natural letter; People gets `p`.
+    #[test]
+    fn g_c_goes_to_calendar_and_g_p_goes_to_people() {
+        let mut app = App::new(bridge());
+        let _ = press(&mut app, Key::Character("g".into()), Modifiers::empty());
+        let _ = press(&mut app, Key::Character("c".into()), Modifiers::empty());
+        assert_eq!(app.surface, Surface::Calendar);
+
+        let mut app = App::new(bridge());
+        let _ = press(&mut app, Key::Character("g".into()), Modifiers::empty());
+        let _ = press(&mut app, Key::Character("p".into()), Modifiers::empty());
+        assert_eq!(app.surface, Surface::People);
+    }
+
     #[test]
     fn ctrl_k_opens_the_palette_scoped_to_the_current_surface() {
         let mut app = App::new(bridge());
@@ -822,6 +838,19 @@ mod tests {
         assert_eq!(overlay.picker.query(), "archive", "the prefix and its space are consumed");
         for &index in &overlay.picker.matches(|command| command.label.as_str()) {
             assert_eq!(overlay.picker.item(index).surface, Surface::People);
+        }
+    }
+
+    #[test]
+    fn the_c_prefix_scopes_to_calendar_not_people() {
+        let mut app = App::new(bridge());
+        let all = app.all_commands();
+        let _ = app.open_overlay(all);
+        app.rescope_overlay("c today".to_string());
+        let overlay = app.overlay.as_ref().unwrap();
+        assert_eq!(overlay.picker.query(), "today");
+        for &index in &overlay.picker.matches(|command| command.label.as_str()) {
+            assert_eq!(overlay.picker.item(index).surface, Surface::Calendar);
         }
     }
 
