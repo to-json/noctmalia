@@ -12,7 +12,7 @@ landable and reviewable, in the shape `docs/mail-plan.md` already established fo
 | 3 | [`config-plan.md`](config-plan.md) | 2 (soft) | Shipped 2026-09-15 |
 | 4 | [`context-commands-plan.md`](context-commands-plan.md) | 3 (hard) | Shipped 2026-09-15 |
 | 5 | [`scripting-socket-plan.md`](scripting-socket-plan.md) | 2 (hard) | Shipped 2026-09-15 |
-| 6 | [`mode-visual-plan.md`](mode-visual-plan.md) | 2 (soft) | Not started |
+| 6 | [`mode-visual-plan.md`](mode-visual-plan.md) | 2 (soft) | Shipped 2026-09-15 |
 
 ```
 Reminders (no deps) ─────────────────────────────────────────► ships first
@@ -49,5 +49,19 @@ These apply to every plan below and are not restated per-plan:
 
 want.md's own closing line is the umbrella goal none of the six plans states directly: *"a mail
 experience good enough to leave mail.app from macos."* That's not a feature to build, it's the bar
-the other six are for. Once Plan 6 ships, that's the moment to actually ask the question — daily
-driving mail here, does it beat Mail.app — rather than assuming six shipped plans add up to yes.
+the other six are for.
+
+**All six shipped 2026-09-15.** Every stream landed as its own reviewable commit, every plan file
+was updated in place with what building it actually changed (three genuine simplifications worth
+re-reading if picking this back up: Plan 4's context menu turned out to need no new
+`noctalia-iced` primitive at all — it reuses Plan 2's picker — and Plan 4's Stream 0 spike found
+that iced 0.14's read-only text has no selection API anywhere in the app, not just in the pager;
+Plan 5's dispatch design resolved to fire-and-forget rather than the request/response shape it
+expected). Verified beyond the test suite where it mattered: the palette, the context menu, and
+the compose mode badge were each screenshotted and looked at, and the scripting socket was driven
+live with `noctmalia-ctl.py` against a real running app, not just the fake bridge.
+
+What's still true is the umbrella question itself: six shipped plans are the bar being built *to*,
+not proof the bar is cleared. That's a "drive it for a while" verdict, not a code-review one — the
+next honest step is using this as a daily mail client and seeing whether it actually beats
+Mail.app, not assuming a green test suite answers that.
