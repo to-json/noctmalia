@@ -109,3 +109,25 @@ impl<Message> canvas::Program<Message> for HtmlView {
         vec![frame.into_geometry()]
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A real Google security-alert email (captured live, see `docs/html-mail-plan.md`) once segfaulted
+    /// litehtml on this exact content — not through anything wrong with the HTML itself, but
+    /// because `measure`'s font-system lock got contended in the live app and the resulting panic
+    /// unwound through litehtml's C++ stack (undefined behaviour, fixed in litehtml-sys's
+    /// trampoline with `catch_unwind`). This fixture stays as a real-world smoke test: actual
+    /// Gmail markup, actual `<img>` tags, actual nested tables, at a realistic reading-pane width.
+    #[test]
+    fn a_real_captured_gmail_message_renders_without_crashing() {
+        let html = include_str!("fixtures/security-alert.html");
+        let rendered = render_with_measure(html, 380, i32::MAX);
+        assert!(!rendered.primitives.is_empty());
+    }
+
+    fn render_with_measure(html: &str, width: i32, height: i32) -> litehtml_sys::Rendered {
+        litehtml_sys::render_with_measure(html, width, height, &mut measure).expect("litehtml should accept this document")
+    }
+}

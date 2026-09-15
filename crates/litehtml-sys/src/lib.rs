@@ -116,7 +116,16 @@ pub fn render_with_measure(
     unsafe extern "C" fn trampoline(ctx: *mut c_void, text: *const c_char, size_px: i32) -> i32 {
         let measure = unsafe { &mut *ctx.cast::<&mut dyn FnMut(&str, i32) -> i32>() };
         let text = unsafe { CStr::from_ptr(text) }.to_str().unwrap_or("");
-        measure(text, size_px)
+        // `measure` runs arbitrary caller code (real font shaping, in practice) from inside a C++
+        // call stack (litehtml is mid-layout when it asks for this). A Rust panic unwinding through
+        // foreign frames is undefined behaviour — not a clean abort, an honest-to-god memory
+        // corruption that can crash *elsewhere* in litehtml, which is exactly what a poisoned
+        // font-system lock did here once, three times, only in the live app (a lock the caller
+        // holds is a caller concern; not letting it become a segfault is this trampoline's job).
+        // On panic, fall back to the same fixed per-character estimate `render` uses without a
+        // measurer at all — wrong width, never a crash.
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| measure(text, size_px)))
+            .unwrap_or_else(|_| text.chars().count() as i32 * (size_px * 3 / 5))
     }
 
     render_with(html, viewport_w, viewport_h, Some(trampoline), ctx)
@@ -201,6 +210,18 @@ fn render_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A panic inside `measure` would otherwise unwind through litehtml's C++ call stack —
+    /// undefined behaviour, observed in the wild as litehtml segfaulting deep in its own layout
+    /// code on a real Gmail message, nowhere near where the actual panic happened. The trampoline
+    /// must catch it and carry on rather than let a caller's bug become a crash bug here.
+    #[test]
+    fn a_panicking_measure_callback_does_not_crash_the_process() {
+        let html = "<html><body><p>one two three four five six seven eight</p></body></html>";
+        let mut always_panics = |_: &str, _: i32| -> i32 { panic!("simulated: a poisoned lock, or anything else") };
+        let rendered = render_with_measure(html, 300, 600, &mut always_panics);
+        assert!(rendered.is_some_and(|r| !r.primitives.is_empty()), "should still render, via the fallback width");
+    }
 
     /// Stream 0's exit criterion, made permanent: litehtml links, lays real HTML out, and hands
     /// back at least one paintable primitive. If this stops passing, the FFI boundary broke, not

@@ -248,3 +248,36 @@ and was treated as out of scope for "litehtml support" specifically — litehtml
 touches the network (`shim.cpp`'s `load_image`/`import_css` remain deliberate no-ops), so nothing
 about landing this weakened "we load nothing by default." Real image loading in either render mode
 is future work.
+
+## A real crash, found the same day it shipped (2026-09-15)
+
+Live-testing against a real Gmail account (a Google "you granted Thunderbird access" notification,
+`multipart/alternative` with a substantive plain-text part *and* an HTML one — see the "plain wins
+by default" fix above) segfaulted litehtml three times in a row, always inside litehtml's own
+`html_tag::draw_background`, deep in *its* code, nowhere near the actual bug.
+
+Isolating the exact captured HTML into a standalone repro (`litehtml_sys::render`) didn't reproduce
+it at all — not at any viewport width from 60px to 900px. The live app and the isolated repro
+differ in exactly one way that matters: the live app measures text through
+`iced_graphics::text::Paragraph`, which takes a lock on iced's global font-system `RwLock`; the
+repro's plain `render()` doesn't measure anything, it guesses. That pointed at the real bug: if
+that lock ever panics on the live render thread (contention, poisoning, anything), the panic fires
+*inside* `litehtml_sys`'s measurement trampoline — a `extern "C" fn` called by litehtml, from
+litehtml's own C++ call stack. A Rust panic unwinding through foreign stack frames is undefined
+behaviour, not a clean abort, which is exactly why the crash surfaced somewhere else entirely: not
+where the panic happened, but wherever litehtml's now-corrupted internal state next did something
+that touched memory.
+
+Fixed at the one place it can be fixed for good: the trampoline in `litehtml-sys/src/lib.rs` wraps
+the caller's `measure` in `std::panic::catch_unwind` and falls back to the fixed per-character
+guess on panic, so a caller's bug (whatever it turns out to be, and the actual lock-contention
+trigger was never fully chased down) degrades to a wrong width instead of a segfault. Verified with
+a test that panics on purpose (`a_panicking_measure_callback_does_not_crash_the_process`) in both
+debug and `--release` — this repo has no `panic = "abort"` set anywhere, so `catch_unwind` is live
+in the shipped binary too. The actual captured email is now a permanent fixture
+(`crates/noctmalia/src/surfaces/fixtures/security-alert.html`) exercised by
+`a_real_captured_gmail_message_renders_without_crashing` — real Gmail markup, real `<img>` tags,
+real nested tables, not just the synthetic corpus.
+
+**Still not root-caused**: *why* the font-system lock panics in the live app at all. The fix makes
+it survivable, not diagnosed. If it recurs, that's the next thread to pull.
