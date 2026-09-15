@@ -8,7 +8,7 @@ landable and reviewable, in the shape `docs/mail-plan.md` already established fo
 | # | Plan | Depends on | Status |
 |---|---|---|---|
 | 1 | [`reminders-plan.md`](reminders-plan.md) | None | Shipped 2026-09-15 |
-| 2 | [`command-palette-plan.md`](command-palette-plan.md) | None | Not started |
+| 2 | [`command-palette-plan.md`](command-palette-plan.md) | None | Shipped 2026-09-15 |
 | 3 | [`config-plan.md`](config-plan.md) | 2 (soft) | Not started |
 | 4 | [`context-commands-plan.md`](context-commands-plan.md) | 3 (hard) | Not started |
 | 5 | [`scripting-socket-plan.md`](scripting-socket-plan.md) | 2 (hard) | Not started |
