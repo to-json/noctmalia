@@ -99,6 +99,22 @@ docker compose --profile dev down                    # stop (add -v to wipe)
 - **Size limit:** messages from host to extension are capped at 1 MiB. Extension → host has no practical cap. Large payloads toward TB, such as outgoing attachments, need chunking. Not built.
 - **Background page:** MV3 event pages are killed when idle, so we use MV2 with a persistent background.
 - `fetch()` to `127.0.0.1` from the background works, given the host permission.
+- **Reconnect after the host restarts is occasionally flaky (2026-09-15, unconfirmed root cause).**
+  `background.js`'s `connect()`/`onDisconnect` (bridge/background.js:292-302) is supposed to spawn a
+  fresh `nm-shim` and re-attach whenever the far side (`noctmalia`, restarted often in dev) goes
+  away and comes back. In one session, after many hours of restarts (a GUI-mode Thunderbird window
+  closed ungracefully, several `TBD_MODE` flips, the OAuth wizard, extended mail testing), a plain
+  UI-only restart (`just ui`) stopped reattaching — `nm-shim` reconnected fine at the transport
+  level (its own state file said `connected`), but `bridge.hello` never arrived, so the app sat on
+  "loading" forever. Six clean consecutive restarts against a freshly recreated `tbd` container
+  afterward all worked, so this isn't "only connects once" as a hard rule — more likely a rarer race
+  that gets more likely the longer a `tbd` container has been alive and cycled through. No console
+  output from `background.js` was visible to confirm which side of `connect()` misbehaves (the
+  `devtools.console.stdout.chrome` pref covers privileged/Experiment code, not the WebExtension's
+  own background page — worth finding the right pref, or adding explicit debug logging, before
+  attempting a real fix). **Reliable workaround:** recreate the `tbd` container
+  (`docker compose -f compose.yaml -f compose.ui.yaml up -d --force-recreate tbd`) — this always
+  reset it cleanly, every time it was tried.
 
 ### API gotchas
 - **`messages.send` is an OptionalOnlyPermission.** It is silently ignored in `permissions`. Declare it in `optional_permissions`, grant it through `ExtensionPermissions.add` in privileged code, then call `runtime.reload()` once: permission-gated functions are injected only when the background page starts. The grant persists in `extension-preferences.json`.
