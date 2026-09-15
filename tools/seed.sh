@@ -28,4 +28,13 @@ docker compose exec -T mailnd python /tools/bridgectl.py wait bridge.hello --tim
   | python3 -c 'import json,sys; h=json.load(sys.stdin)["data"]; print("Thunderbird %s, bridge %s" % (h["browser"]["version"], h["bridgeVersion"]))'
 
 echo "== seeding"
-docker compose exec -T mailnd python /tools/seed.py "$@"
+# test.secret — an email on one line, a password on the next — is read here, on the host, and
+# handed down as two environment variables rather than a file, so the one place the credential is
+# typed stays the one place it is read: nothing under tools/ ever holds it, and nothing here prints
+# it. Absent on every machine that has not been set up with one, in which case this is a no-op.
+if [ -f test.secret ]; then
+  TEST_ACCOUNT_EMAIL="$(sed -n '1p' test.secret)" TEST_ACCOUNT_PASSWORD="$(sed -n '2p' test.secret)" \
+    docker compose exec -T -e TEST_ACCOUNT_EMAIL -e TEST_ACCOUNT_PASSWORD mailnd python /tools/seed.py "$@"
+else
+  docker compose exec -T mailnd python /tools/seed.py "$@"
+fi

@@ -13,6 +13,7 @@ the same profile volume (`compose.ui.yaml`) to look at the result.
 """
 
 import argparse
+import os
 import sys
 
 import bridgectl
@@ -93,6 +94,47 @@ def seed_accounts():
                 ) from None
             raise
         print(f"account {account['name']!r}: created {result.get('accountId')}")
+
+
+def seed_test_account():
+    """A real account to test against, alongside GreenMail — see `test.secret` at the repo root
+    (gitignored, an email on one line and a password on the next, read by nothing else). `seed.sh`
+    reads it on the host and hands it down as two environment variables, so the credential is typed
+    once, ever, into a file nothing commits — not into this script, not into a shell history, and
+    not into anything printed here. A no-op wherever those variables are not set, which is every
+    machine that has not been set up for this.
+    """
+    email = os.environ.get("TEST_ACCOUNT_EMAIL")
+    password = os.environ.get("TEST_ACCOUNT_PASSWORD")
+    if not email or not password:
+        return
+    name = f"test-{email}"
+    have = {account.get("name") for account in call("accounts.list")}
+    if name in have:
+        print(f"account {name!r}: have it")
+        return
+
+    # Gmail's own hosts; anything else is a guess at the usual `imap./smtp.<domain>` convention,
+    # which is right often enough to be worth trying before asking for more configuration.
+    domain = email.rsplit("@", 1)[-1]
+    imap_host = "imap.gmail.com" if domain == "gmail.com" else f"imap.{domain}"
+    smtp_host = "smtp.gmail.com" if domain == "gmail.com" else f"smtp.{domain}"
+    config = {
+        "name": name,
+        "email": email,
+        "fullName": "Test",
+        "imap": {"host": imap_host, "port": 993, "socketType": "tls", "auth": "cleartext",
+                 "username": email, "password": password},
+        "smtp": {"host": smtp_host, "port": 465, "socketType": "tls", "auth": "cleartext", "password": password},
+    }
+    try:
+        # Real IMAP providers often refuse a plain password outright (Gmail wants OAuth2 or an
+        # app password); that shows up here as a normal BridgeError, not a crash.
+        result = call("dev.provisionAccount", config, timeout=120)
+    except BridgeError as error:
+        print(f"account {name!r}: could not provision it — {error}", file=sys.stderr)
+        return
+    print(f"account {name!r}: created {result.get('accountId')}")
 
 
 def folders_of(account):
@@ -216,6 +258,7 @@ def main():
     try:
         if options.accounts or options.mail or options.flood or both:
             seed_accounts()
+            seed_test_account()
         if options.contacts or both:
             seed_contacts(options.reset)
         if options.mail or both:
