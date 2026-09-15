@@ -188,7 +188,7 @@ impl App {
                 return Task::batch([
                     self.contacts.notify(&name, &self.shell).map(Message::Contacts),
                     self.mail.notify(&name, &data, &self.shell).map(Message::Mail),
-                    self.calendar.notify(&name, &self.shell).map(Message::Calendar),
+                    self.calendar.notify(&name, &data, &self.shell).map(Message::Calendar),
                 ]);
             }
 

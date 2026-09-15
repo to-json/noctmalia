@@ -465,6 +465,12 @@ def handle(store, method, params, emit):
         if event:
             emit("calendar.items.onRemoved", {"calendarId": event["calendarId"], "id": event["id"]})
         return None
+    if method == "calendar.items.fireAlarm":
+        # Not a real bridge method — Thunderbird's alarm service fires these on its own timer,
+        # with nothing to ask for one on demand. This is the fake-only lever a test pulls instead.
+        event = store.events[params["id"]]
+        emit("calendar.items.onAlarm", {"item": event, "alarm": {"action": "display"}})
+        return None
     raise KeyError(method)
 
 

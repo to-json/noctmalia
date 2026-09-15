@@ -10,6 +10,7 @@ use chrono::{Duration, Local};
 use noctmalia::calendar::{self, Cal};
 use noctmalia::ical::{Event, Recur, When};
 use noctmalia_bridge::{Bridge, Event as BridgeEvent};
+use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration as StdDuration;
@@ -125,6 +126,38 @@ async fn hiding_a_calendar_empties_it_out_of_a_query() {
     let personal_ids = vec!["personal".to_string()];
     let items = calendar::items(bridge, personal_ids, start, end).await.expect("items");
     assert!(items.iter().all(|item| item.calendar_id == "personal"));
+}
+
+/// `calendar.items.fireAlarm` is not a real bridge method — Thunderbird's alarm service fires
+/// `onAlarm` on its own timer, with nothing to ask for one on demand. This is the fake-only lever
+/// `docs/reminders-plan.md` adds so the wire path (fake → bridge → notify) is provable without a
+/// real Thunderbird and a real wait.
+#[tokio::test]
+async fn firing_an_alarm_notifies_with_the_event_that_fired() {
+    let Some((bridge, cals, _fake, _socket)) = attached("alarm").await else { return };
+    let work = cals.iter().find(|cal| cal.id == "work").expect("work calendar");
+    let (start, end) = wide_range();
+    let items = calendar::items(bridge.clone(), vec![work.id.clone()], start, end).await.expect("items");
+    let standup = items.iter().find(|item| item.event.summary == "Standup").expect("standup");
+
+    let mut events = bridge.subscribe();
+    bridge.call_raw("calendar.items.fireAlarm", json!({ "id": standup.id })).await.expect("fireAlarm");
+
+    let data = tokio::time::timeout(StdDuration::from_secs(5), async {
+        loop {
+            if let Some(BridgeEvent::Notify { name, data }) = events.next().await {
+                if name == "calendar.items.onAlarm" {
+                    return data;
+                }
+            }
+        }
+    })
+    .await
+    .expect("an onAlarm notify");
+
+    let ical = data.get("item").and_then(|item| item.get("item")).and_then(Value::as_str);
+    let title = ical.and_then(Event::parse).map(|event| event.summary);
+    assert_eq!(title.as_deref(), Some("Standup"));
 }
 
 #[tokio::test]

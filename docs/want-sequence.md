@@ -5,14 +5,14 @@ landable and reviewable, in the shape `docs/mail-plan.md` already established fo
 
 ## The plans, in order
 
-| # | Plan | Depends on |
-|---|---|---|
-| 1 | [`reminders-plan.md`](reminders-plan.md) | None |
-| 2 | [`command-palette-plan.md`](command-palette-plan.md) | None |
-| 3 | [`config-plan.md`](config-plan.md) | 2 (soft) |
-| 4 | [`context-commands-plan.md`](context-commands-plan.md) | 3 (hard) |
-| 5 | [`scripting-socket-plan.md`](scripting-socket-plan.md) | 2 (hard) |
-| 6 | [`mode-visual-plan.md`](mode-visual-plan.md) | 2 (soft) |
+| # | Plan | Depends on | Status |
+|---|---|---|---|
+| 1 | [`reminders-plan.md`](reminders-plan.md) | None | Shipped 2026-09-15 |
+| 2 | [`command-palette-plan.md`](command-palette-plan.md) | None | Not started |
+| 3 | [`config-plan.md`](config-plan.md) | 2 (soft) | Not started |
+| 4 | [`context-commands-plan.md`](context-commands-plan.md) | 3 (hard) | Not started |
+| 5 | [`scripting-socket-plan.md`](scripting-socket-plan.md) | 2 (hard) | Not started |
+| 6 | [`mode-visual-plan.md`](mode-visual-plan.md) | 2 (soft) | Not started |
 
 ```
 Reminders (no deps) ─────────────────────────────────────────► ships first

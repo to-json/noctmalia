@@ -33,6 +33,7 @@ use iced::{Alignment, Color, Element, Length, Padding, Task};
 use noctalia_iced::keymap::{self, Keymap};
 use noctalia_iced::theme::{self, ButtonVariant};
 use noctalia_iced::widgets;
+use serde_json::Value;
 use std::time::Instant;
 
 const RAIL_WIDTH: f32 = 200.0;
@@ -50,6 +51,21 @@ const MORNING: f32 = 7.0;
 /// Scrolls the Week/Day timeline to [`MORNING`]. See [`Calendar::reload_and_maybe_scroll`].
 fn scroll_to_morning() -> Task<Message> {
     operation::scroll_to(Id::new(TIMELINE_ID), AbsoluteOffset { x: 0.0, y: MORNING * HOUR_HEIGHT })
+}
+
+/// What `calendar.items.onAlarm`'s toast says — the event's own title, named plainly rather than
+/// left as "an event" when the payload parses (it always should; the fallback is for a shape this
+/// has never actually been seen in).
+fn alarm_message(data: &Value) -> String {
+    let title = data
+        .get("item")
+        .cloned()
+        .and_then(|node| calendar::item_from_node(node).ok())
+        .map(|item| item.event.summary);
+    match title {
+        Some(title) => format!("Reminder — {title}"),
+        None => "Reminder".to_string(),
+    }
 }
 
 // ── Messages ────────────────────────────────────────────────────────────────
@@ -79,6 +95,9 @@ pub enum Message {
     Cancel,
     Escape,
     Refresh,
+    /// Thunderbird's alarm service fired a reminder — `calendar.items.onAlarm` — with the
+    /// message already reduced to what the toast says.
+    Alarm(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -427,6 +446,7 @@ impl Calendar {
                 }
             }
             Message::Refresh => return self.reload(shell),
+            Message::Alarm(text) => shell.announce(text, now),
         }
         Task::none()
     }
@@ -516,7 +536,12 @@ impl Calendar {
         Task::perform(calendar::calendars(shell.bridge()), Message::Cals)
     }
 
-    pub fn notify(&mut self, name: &str, shell: &Shell) -> Task<Message> {
+    pub fn notify(&mut self, name: &str, data: &Value, shell: &Shell) -> Task<Message> {
+        if name == "calendar.items.onAlarm" {
+            // A reminder firing doesn't change what's in a folder or a range — nothing here
+            // needs a reload, only the toast.
+            return Task::done(Message::Alarm(alarm_message(data)));
+        }
         if name.starts_with("calendar.calendars.") {
             return self.resync(shell);
         }
@@ -1160,6 +1185,23 @@ mod tests {
     #[test]
     fn no_binding_is_a_prefix_of_another() {
         KEYS.with(|keys| assert_eq!(keys.conflicts(), Vec::<(String, String)>::new()));
+    }
+
+    #[test]
+    fn a_fired_alarm_names_its_event() {
+        let ical = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:e1\r\nSUMMARY:Standup\r\n\
+                    DTSTART:20260101T090000Z\r\nDTEND:20260101T093000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let data = serde_json::json!({
+            "item": {"id": "e1", "calendarId": "work", "item": ical},
+            "alarm": {"action": "display"},
+        });
+        assert_eq!(alarm_message(&data), "Reminder — Standup");
+    }
+
+    #[test]
+    fn an_alarm_payload_that_does_not_parse_still_toasts_something() {
+        let data = serde_json::json!({"item": {"id": "e1", "calendarId": "work", "item": "not ical"}});
+        assert_eq!(alarm_message(&data), "Reminder");
     }
 
     #[test]

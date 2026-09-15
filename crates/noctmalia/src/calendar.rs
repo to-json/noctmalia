@@ -60,6 +60,13 @@ impl TryFrom<ItemNode> for Item {
     }
 }
 
+/// The same `{id, calendarId, item}` shape a call's own response hands back, but reached instead
+/// through a notify payload — `calendar.items.onAlarm`'s `item` field, in particular.
+pub fn item_from_node(node: Value) -> Result<Item> {
+    let node: ItemNode = serde_json::from_value(node).map_err(|error| error.to_string())?;
+    Item::try_from(node)
+}
+
 /// Errors reach the UI as text: iced messages must be `Clone`, and there is nothing to do with a
 /// bridge error but show it.
 pub type Result<T> = std::result::Result<T, String>;
