@@ -514,6 +514,11 @@ impl Calendar {
         false
     }
 
+    /// Whether an event is being created or edited — `docs/mode-visual-plan.md`'s "compose" mode.
+    pub fn composing(&self) -> bool {
+        self.editor.is_some()
+    }
+
     pub fn press(&mut self, key: &Key, modifiers: Modifiers) -> Pressed<Message> {
         match KEYS.with(|keys| keys.press(&mut self.pending, key, modifiers)) {
             keymap::Resolved::Ignored => Pressed::Ignored,

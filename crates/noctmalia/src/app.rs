@@ -527,6 +527,13 @@ impl App {
             let capsule = chrome::capsule(surface.glyph(), Message::Show(surface), false);
             bar = bar.push(ui::tip(capsule, surface.hint()));
         }
+        if let Some((label, color)) = self.mode().badge() {
+            bar = bar.push(
+                container(text(label).size(theme::FONT_MINI).font(theme::semibold()).color(color))
+                    .padding(iced::Padding::from([1.0, theme::SPACE_XS]))
+                    .style(theme::track),
+            );
+        }
         // A half-typed sequence appears where the thing it is about to change already is. It is the
         // whole of the modal feedback, and it is one line of text.
         let typed = match self.surface {
@@ -542,6 +549,42 @@ impl App {
             );
         }
         bar.into()
+    }
+
+    /// Which of `docs/mode-visual-plan.md`'s states the window is in right now. Overlay wins over
+    /// compose — a picker sitting over an open composer swallows every key exactly as it would
+    /// over the index, so what it looks like takes precedence over what's underneath it.
+    fn mode(&self) -> Mode {
+        if self.overlay.is_some() {
+            return Mode::Overlay;
+        }
+        let composing = match self.surface {
+            Surface::Mail => self.mail.composing(),
+            Surface::People => self.people.composing(),
+            Surface::Calendar => self.calendar.composing(),
+        };
+        if composing { Mode::Compose } else { Mode::Browse }
+    }
+}
+
+/// The window's mode, in the sense `docs/mode-visual-plan.md` means it: what a keypress does right
+/// now. `Browse` shows no badge at all — it is the resting state, and a badge that is always on
+/// screen stops meaning anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Browse,
+    Compose,
+    Overlay,
+}
+
+impl Mode {
+    /// The titlebar badge for this mode, or `None` for the resting state.
+    fn badge(self) -> Option<(&'static str, iced::Color)> {
+        match self {
+            Mode::Browse => None,
+            Mode::Compose => Some(("Compose", theme::palette().primary)),
+            Mode::Overlay => Some(("Command", theme::palette().tertiary)),
+        }
     }
 }
 
@@ -715,6 +758,28 @@ mod tests {
         app.press(key, modifiers, false, Instant::now())
     }
 
+    /// Every string in the laid-out window, titlebar included — `tests/mail.rs`'s `render`, aimed
+    /// at the whole `App` rather than one surface, for asserting on the mode badge specifically.
+    fn texts(app: &App) -> Vec<String> {
+        use iced_selector::Candidate;
+        use std::sync::{Arc, Mutex};
+
+        let element = app.view().map(|_| ());
+        let mut simulator = iced_test::simulator(element);
+        let _ = simulator.snapshot(&Theme::Dark).expect("the window lays out and draws");
+
+        let found: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let collecting = Arc::clone(&found);
+        let _: Result<(), _> = simulator.find(move |candidate: Candidate<'_>| -> Option<()> {
+            if let Candidate::Text { content, .. } = candidate {
+                collecting.lock().expect("nothing else holds this").push(content.to_string());
+            }
+            None
+        });
+        let words = found.lock().expect("nothing else holds this");
+        words.clone()
+    }
+
     #[test]
     fn ctrl_k_opens_the_palette_scoped_to_the_current_surface() {
         let mut app = App::new(bridge());
@@ -787,6 +852,57 @@ mod tests {
         assert!(app.overlay.is_none(), "choosing a command closes the palette");
     }
 
+    // ── Mode badge: docs/mode-visual-plan.md §2.2 ────────────────────────────────────
+
+    #[test]
+    fn browse_shows_no_mode_badge() {
+        let app = App::new(bridge());
+        assert_eq!(app.mode(), Mode::Browse);
+        assert!(!texts(&app).iter().any(|text| text == "Compose" || text == "Command"));
+    }
+
+    #[test]
+    fn opening_the_palette_shows_the_command_badge() {
+        let mut app = App::new(bridge());
+        let all = app.all_commands();
+        let _ = app.open_overlay(all);
+        assert_eq!(app.mode(), Mode::Overlay);
+        assert!(texts(&app).iter().any(|text| text == "Command"));
+    }
+
+    fn identity() -> crate::mail::Identity {
+        crate::mail::Identity {
+            id: "id1".to_string(),
+            email: "me@example.com".to_string(),
+            name: "Me".to_string(),
+            account: "a1".to_string(),
+        }
+    }
+
+    #[test]
+    fn composing_shows_the_compose_badge_and_closing_returns_to_browse() {
+        let mut app = App::new(bridge());
+        let _ = app.mail.update(mail::Message::Identities(Ok(vec![identity()])), &mut app.shell, Instant::now());
+        let _ = app.mail.update(mail::Message::Compose(None), &mut app.shell, Instant::now());
+        assert_eq!(app.mode(), Mode::Compose);
+        assert!(texts(&app).iter().any(|text| text == "Compose"));
+
+        let _ = app.mail.update(mail::Message::Escape, &mut app.shell, Instant::now());
+        assert_eq!(app.mode(), Mode::Browse);
+        assert!(!texts(&app).iter().any(|text| text == "Compose"));
+    }
+
+    #[test]
+    fn a_palette_open_over_a_draft_shows_the_overlay_badge_not_the_compose_one() {
+        let mut app = App::new(bridge());
+        let _ = app.mail.update(mail::Message::Identities(Ok(vec![identity()])), &mut app.shell, Instant::now());
+        let _ = app.mail.update(mail::Message::Compose(None), &mut app.shell, Instant::now());
+        assert!(app.mail.composing(), "the draft actually needs to be open for this test to mean anything");
+        let all = app.all_commands();
+        let _ = app.open_overlay(all);
+        assert_eq!(app.mode(), Mode::Overlay, "what's on top wins over what it's covering");
+    }
+
     /// Not a unit test of the pieces — those are above, and in `noctalia_iced::picker`'s own
     /// suite — this builds the real widget tree with the palette open and lays it out, the same
     /// reason `tests/mail.rs`'s `render` exists: a shadow, a stack of two opaque layers, and a
@@ -852,6 +968,28 @@ mod tests {
             std::env::var("NOCTMALIA_SHOTS").unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/shots").to_string());
         std::fs::create_dir_all(&directory).expect("somewhere to write to");
         let path = std::path::Path::new(&directory).join("context-menu-open.png");
+        let _ = std::fs::remove_file(&path);
+        assert!(snapshot.matches_image(&path).expect("write the png"));
+        eprintln!("wrote {}", path.display());
+    }
+
+    /// Same disclaimer as `shot_of_the_palette_open`.
+    #[test]
+    #[ignore = "writes a PNG rather than asserting"]
+    fn shot_of_the_compose_badge() {
+        use iced::{Settings, Size};
+        let mut app = App::new(bridge());
+        let _ = app.mail.update(mail::Message::Identities(Ok(vec![identity()])), &mut app.shell, Instant::now());
+        let _ = app.mail.update(mail::Message::Compose(None), &mut app.shell, Instant::now());
+        let element = app.view().map(|_| ());
+        let settings =
+            Settings { default_font: crate::font::ui(), fonts: vec![noctalia_iced::theme::ICON_FONT_BYTES.into()], ..Settings::default() };
+        let mut simulator = iced_test::Simulator::with_size(settings, Size::new(1180.0, 720.0), element);
+        let snapshot = simulator.snapshot(&Theme::Dark).expect("it draws");
+        let directory =
+            std::env::var("NOCTMALIA_SHOTS").unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/shots").to_string());
+        std::fs::create_dir_all(&directory).expect("somewhere to write to");
+        let path = std::path::Path::new(&directory).join("compose-badge.png");
         let _ = std::fs::remove_file(&path);
         assert!(snapshot.matches_image(&path).expect("write the png"));
         eprintln!("wrote {}", path.display());

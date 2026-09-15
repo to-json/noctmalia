@@ -498,6 +498,12 @@ impl Mail {
         self.motion.animating(now)
     }
 
+    /// Whether a reply, forward or new message is open — `docs/mode-visual-plan.md`'s "compose"
+    /// mode, one of the few genuinely focused-text-widget states mail-plan §5 already named.
+    pub fn composing(&self) -> bool {
+        self.composing.is_some()
+    }
+
     pub fn typed(&self) -> String {
         self.pending.typed()
     }

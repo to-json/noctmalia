@@ -2,6 +2,7 @@
 
 Date: 2026-09-14
 Depends on: `command-palette-plan.md` (soft — palette-open is a mode too)
+Status: **Shipped 2026-09-15.**
 
 ---
 
@@ -31,41 +32,60 @@ two states and reworking it for three or four.
 
 ## Stream 1: A mode indicator
 
-**Files:** `crates/noctmalia/src/ui.rs`, `crates/noctmalia/src/shell.rs`
+**Files:** `crates/noctmalia/src/app.rs`, `crates/noctmalia/src/surfaces/{mail,people,calendar}.rs`
 
-### 1.1 Enumerate the actual states
-Confirm which of the four states above are live in the tree at implementation time (palette is
-certain; menu-open depends on `context-commands-plan.md`'s status) rather than assuming a fixed
-count.
+### 1.1 Enumerate the actual states — resolved to three, not four
+`context-commands-plan.md` shipped before this plan, but its "menu-open" state turned out not to
+be a fourth state at all: Stream 2 of that plan reused `command-palette-plan.md`'s own
+`Overlay`/`Picker` machinery for the context menu rather than building a separate primitive, so a
+context menu *is* a palette-open state as far as the window is concerned — same `self.overlay`
+field, same swallow-every-key behavior. The real three: **Browse** (nothing focused but the
+keymap), **Compose** (a surface's own `composing()` — mail's open draft, people's or calendar's
+open editor — is `Some`), and **Overlay** (`self.overlay.is_some()`, covering the palette,
+quick-open, and every context menu alike).
 
-### 1.2 The affordance
-Candidate: a thin accent-colored bar or dot in the titlebar (which already hosts the surface
-switcher, per mail-plan §4) that changes color/state between the live modes — using existing
-palette roles and the existing motion primitives for the transition, not a new bespoke indicator
-style. Settle the exact visual in implementation, not here — this is a plan, not a mockup.
+### 1.2 The affordance — built
+A small badge beside the surface switcher in the titlebar, styled with `theme::track` — the exact
+container style the half-typed keymap sequence badge already used, so this reads as the same kind
+of thing rather than a new visual idiom. `Browse` shows nothing at all: a badge that's always on
+screen stops meaning anything. `Compose` shows "Compose" in `theme::palette().primary`; `Overlay`
+shows "Command" in `theme::palette().tertiary`. Overlay wins when both are true at once (a palette
+open over a draft) — what's on top of the stack is what the badge should describe.
+
+**Simplified from the plan's own "existing motion primitives for the transition" language:** no
+animated transition. The badge appears and disappears instantly. `docs/command-palette-plan.md`
+and `docs/context-commands-plan.md` both introduced real motion elsewhere in this pass (the
+picker's own layout); an animated mode badge is a legitimate future polish pass, not something
+this one needed to block on.
 
 ## Stream 2: Visual language audit
 
 **Files:** wherever surfaces diverge
 
-### 2.1 Sweep for one-offs, with a bounded list
-"Audit the whole UI" is scope-creep-shaped by construction. Before starting, write down the
-specific list of suspected drift (e.g. spacing that doesn't match `widgets::ROW_HEIGHT`, a color
-that isn't one of the sixteen roles) found while drafting this plan's implementation — the sweep
-fixes that list, not an open-ended search for more.
+### 2.1 Swept — no drift found worth fixing
+Checked directly rather than assumed: every `Color` construction in `crates/noctmalia/src` outside
+`noctalia-iced`'s own `theme.rs` goes through a palette role — there is no hardcoded hex or
+`Color::from_rgb` anywhere in the app crate to begin with. The one thing that looked like drift on
+first grep — `spacing(1)`/`spacing(2)`/`padding(0)` hairline values scattered across mail, people
+and calendar rather than named constants — turned out to be the *same* value used identically
+everywhere a label sits tight against its content, which is consistency without a name rather than
+three surfaces disagreeing. Worth promoting to a named constant (`theme::HAIRLINE_GAP` or similar)
+as a pure refactor sometime; not a bug this plan needs to fix, and inventing a change here only to
+have swept something would be exactly the scope creep §2.1's own caution warned about.
 
 ### 2.2 Test
-Widget-tree assertions (`tests/mail.rs`'s style) that mode-affects-rendering: opening the composer
-changes the indicator state; opening the palette does too; closing returns to browse.
+Widget-tree assertions (`tests/mail.rs`'s `render`-style pattern, aimed at the whole `App`):
+browse shows no badge, opening the composer shows "Compose" and closing it returns to no badge,
+opening the palette shows "Command", and a palette opened over an existing draft shows "Command"
+rather than "Compose".
 
 ## Sequence integration
 
-Soft dependency on `command-palette-plan.md` for Stream 1's palette state; a real but softer
-dependency on `context-commands-plan.md` for the menu-open state, resolved by 1.1 checking what's
-actually shipped rather than assuming. Stream 2 can start anytime.
+Landed last in the sequence, after every other plan had shipped — which is what let Stream 1.1
+discover that context-commands-plan.md's "menu-open" folded into "overlay" instead of adding a
+fourth state, rather than guessing at that ahead of time.
 
 ## Risks
 
-- Scope creep on the audit — bounded explicitly by 2.1 rather than left open.
-- If `context-commands-plan.md` ships after this plan, Stream 1 will need a follow-up pass for the
-  fourth state; that's an acceptable, named gap rather than a reason to block on sequencing.
+- None outstanding. The scope-creep risk on the audit (2.1) resolved itself: the audit found
+  nothing to fix, which is a valid outcome, not a sign the sweep wasn't thorough enough.

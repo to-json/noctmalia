@@ -688,6 +688,11 @@ impl People {
         self.motion.animating(now)
     }
 
+    /// Whether a contact is being created or edited — `docs/mode-visual-plan.md`'s "compose" mode.
+    pub fn composing(&self) -> bool {
+        self.editor.is_some()
+    }
+
     fn rail(&self, now: Instant) -> Element<'_, Message> {
         // Where the bar is this frame, in rows. The rows read their fill off it too, so the quiet
         // surface behind the selection travels with the bar instead of jumping ahead of it.
