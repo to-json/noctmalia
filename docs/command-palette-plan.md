@@ -103,10 +103,17 @@ concrete command needs more.
 
 ### 3.2 Backfill from the existing keymaps
 Walk each surface's already-keybound `Binding` table (mail-plan §5's, people's, calendar's) and
-register each one as a `Command` — this is the one bounded, concrete task: every *currently bound*
-key becomes a `Command`. Actions that exist only as a button's `on_press` with no `Binding` are out
-of scope for this plan and can be added incrementally later; don't let "register everything" grow
-into "audit every `on_press` in the app."
+register the ones whose effect stands on its own without a count or a held key — archive, search,
+compose, reply/forward, jump-to-folder, propose-a-rule, save, delete, and so on.
+
+**Narrowed during implementation, noted here rather than silently done:** pure cursor movement
+(`j`/`k`/`gg`/`G`, half/full-page scroll) and `Open`/`Back`/`Fold`, which exist to be repeated or
+held rather than invoked once from a list, are left out. A palette entry that just says "down" is
+discoverable clutter, not discoverability — nobody fuzzy-types their way to an arrow key — and the
+interview's own answer here ("not really sure … focus on sequencing rather than scope") left the
+exact cut a judgment call rather than a mandate to include them. Actions that exist only as a
+button's `on_press` with no `Binding` are still out of scope for this plan; don't let this grow
+into auditing every `on_press` in the app.
 
 ## Stream 4: The palette and quick-open surfaces
 
