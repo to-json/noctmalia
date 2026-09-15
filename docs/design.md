@@ -26,6 +26,15 @@
 > contacts existed to compare it against. Cut from this pass, deliberately: invite RSVP (attendees
 > are shown read-only and round-tripped, never edited) and a Tasks view — see the plan this was
 > built from for the reasoning, same shape as mail-plan.md's own cuts.
+>
+> **2026-09-15: OAuth2 (Gmail, IMAP) is in progress** — see `docs/oauth-plan.md`. The plan's central
+> question is answered: Thunderbird's own baked-in Gmail OAuth client works with no Google Cloud
+> project of our own, confirmed by completing real consent through the account wizard in a
+> `TBD_MODE=gui` session and then reattaching headlessly against the same profile. What's left is
+> the bridge/tooling work (Streams 2-4) plus confirming a token survives a fresh, never-consented
+> profile. Real Gmail mail also surfaced and led to fixing a genuine mail-surface bug along the
+> way: `message/rfc822` parts (forwards, bounces) weren't recognized as containers — see
+> `crates/noctmalia/src/mime/mod.rs`.
 
 Status: the transport, contacts, **mail** and **calendar** exist and are tested against a real
 headless Thunderbird (`tools/smoke.sh`) or, for calendar's UI-level bridge calls, against

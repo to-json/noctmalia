@@ -1,0 +1,22 @@
+# Interactive bootstrap: a real Thunderbird window, for OAuth consent and anything else that
+# needs an actual browser/window in the loop. See docs/oauth-plan.md Stream 1.
+#
+#   docker compose -f compose.yaml -f compose.gui.yaml up -d --build tbd
+#   # ... do the interactive thing ...
+#   docker compose up -d tbd    # back to normal headless mode when done
+#
+# Needs a real Wayland session on the host, uid 1000 (check `id -u`). Bind-mounts the host's own
+# Wayland socket straight in — same trick compose.ui.yaml uses for the bridge socket.
+
+services:
+  tbd:
+    environment:
+      TBD_MODE: gui
+      WAYLAND_DISPLAY: wayland-0
+      XDG_RUNTIME_DIR: /run/user/1000
+    volumes:
+      # A single-file bind mount of just the socket leaves /run/user/1000 root-owned inside the
+      # container (Docker synthesizes the parent dir), which Gecko's Wayland proxy can't write its
+      # own extra socket into. Mount the whole runtime dir instead — same uid on both sides (1000),
+      # so ownership lines up, at the cost of exposing the host's other sockets in it to tbd.
+      - ${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR must be set}:/run/user/1000
