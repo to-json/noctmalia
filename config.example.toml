@@ -1,0 +1,29 @@
+# noctmalia config — copy to $XDG_CONFIG_HOME/noctmalia/config.toml (usually
+# ~/.config/noctmalia/config.toml) and trim it to what you actually want.
+#
+# Missing entirely: every default below applies, silently. Present but malformed: noctmalia starts
+# anyway, on the defaults, and says which file and line in a toast — it never guesses what you meant.
+
+# A right-click command template: highlight text, choose it from the menu, and `command` runs with
+# `{selection}` replaced by exactly what was highlighted — shell-quoted for you, since `command` is
+# an argv list rather than a shell string, so there is nothing here to quote yourself. Its output is
+# always shown, never used to replace or edit the selection: most selection happens in the read-only
+# mail pager, and a template that works there and one that only makes sense in an editable field
+# should look the same to write.
+#
+# `contexts` limits which surfaces' selections offer this template. Leave it out, or empty, to offer
+# it everywhere selection exists — the mail pager, a person's card fields, an event's description.
+# Recognised so far: "mail-body", "person-field", "event-description".
+
+[[template]]
+name = "Look up"
+command = ["dict", "{selection}"]
+contexts = ["mail-body"]
+
+[[template]]
+name = "Open in browser"
+command = ["xdg-open", "{selection}"]
+
+[[template]]
+name = "Copy to clipboard"
+command = ["wl-copy", "{selection}"]

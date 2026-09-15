@@ -19,6 +19,7 @@
 //! shows up in the titlebar next to the thing it is about to change.
 
 use crate::commands::Command;
+use crate::config;
 use crate::palette;
 use crate::shell::Shell;
 use crate::surfaces::{Pressed, Surface, calendar, mail, people};
@@ -98,6 +99,11 @@ pub struct App {
     calendar: calendar::Calendar,
     overlay: Option<Overlay>,
     global_pending: keymap::Pending,
+    /// `docs/config-plan.md`. Read once at startup — nothing in the app changes it, and a change
+    /// on disk takes another launch to be seen, which is fine for a file this small and this rare
+    /// to edit. Not read anywhere yet: `docs/context-commands-plan.md` is its first consumer.
+    #[allow(dead_code)]
+    config: config::Config,
     frames: Option<Frames>,
     /// Only the accent has to be held: the other roles are read straight out of the theme, but iced
     /// keeps `primary` in its own palette, so the `Theme` has to be rebuilt when it changes.
@@ -148,15 +154,21 @@ impl Frames {
 
 impl App {
     pub fn new(bridge: Bridge) -> App {
+        let mut shell = Shell::new(bridge, WINDOW.width);
+        let loaded = config::load();
+        if let Some(error) = loaded.error {
+            shell.fail(format!("config: {error}"), Instant::now());
+        }
         App {
             chrome: chrome::initial(),
-            shell: Shell::new(bridge, WINDOW.width),
+            shell,
             surface: Surface::Mail,
             people: people::People::new(),
             mail: mail::Mail::new(),
             calendar: calendar::Calendar::new(),
             overlay: None,
             global_pending: keymap::Pending::default(),
+            config: loaded.config,
             frames: Frames::enabled(),
             accent: theme::palette().primary,
         }
