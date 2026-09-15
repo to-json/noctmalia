@@ -22,47 +22,66 @@ rendering). Stream 0 below resolves this before the rest of the plan is built on
 
 ## Stream 0: Spike — can the pager report a selection?
 
-**Files:** a throwaway probe against `iced::widget::markdown::Viewer`, not shipped code.
+**Resolved during implementation, 2026-09-15 — the answer is no, and it is bigger than the pager.**
+Checked directly against the vendored `iced_widget` 0.14.2 source: selection is implemented in
+exactly two widgets, `text_input` and `text_editor`. Plain `text`/`rich_text` — which is what
+`iced::widget::markdown::view_with` builds, and what the mail-plan §1 pager, a person's card in
+*read* view, and calendar's read-only rows all draw through — has no click-and-drag selection at
+all in this iced version. It is not a gap specific to the markdown `Viewer`; the plan's own
+assumption that "person-field and event-description contexts are ordinary iced text widgets and
+are unaffected" was optimistic in the wrong direction — those are `text()` too when merely
+*viewing* (only the editor forms, while actively being edited, use `text_input`/`text_editor`),
+so they have exactly the same gap the pager does.
 
-### 0.1 Verify
-Confirm whether the markdown `Viewer` (or the underlying widget it renders through) exposes a
-selection span the app can read on right-click. Check both a plain-paragraph selection and one
-crossing element boundaries (e.g. spanning into a list item).
+**What this changes:** "highlight arbitrary text" is not buildable today without a custom
+selectable-text widget — real click-to-character hit-testing against shaped glyphs, which is a
+project on the scale of this plan's *other* four streams combined and belongs in its own plan if
+it's ever worth it, not folded into this one under time pressure.
 
-### 0.2 If yes
-Proceed with Streams 1–3 as drafted below, selection scoped to whatever span the Viewer reports.
-
-### 0.3 If no
-Fall back to operating on **the whole open message** rather than a highlighted span for mail-body
-contexts specifically — person-field and event-description contexts (Stream 1) are ordinary iced
-text widgets and are unaffected either way. Update Stream 1/2 below to match before proceeding;
-don't discover this mid-implementation.
+**What ships instead:** the same right-click-a-template experience, over a coarser unit than a
+free character span — **the row or field you right-click, or the whole open message in the
+pager** — rather than whatever's between two click points. This is still "highlight text, right
+click, run a command on it" in spirit: the "selection" is just resolved by *which widget* was
+clicked rather than by *where inside it*. It also composes cleanly with a future real selection
+widget: only Stream 1's "what is selected" plumbing would need to change, not Stream 2's menu or
+Stream 2.3's execution.
 
 ## Stream 1: Selection plumbing
 
-**Problem:** none of the three surfaces currently expose "what text is selected" as state a menu
-action could read (contingent on Stream 0's answer for the mail pager specifically).
+**Problem:** none of the three surfaces currently expose "what was right-clicked" as state a menu
+action could read.
 
 **Files:** `crates/noctmalia/src/surfaces/{mail,people,calendar}.rs`
 
 ### 1.1 A selection type
-Wherever text is already selectable (a person card's fields, an event's description, and the
-pager if Stream 0 confirms it), capture the selected span as a `String`, surfaced through each
-surface's existing state — not a new cross-cutting selection manager, since iced's own text widgets
-already track selection internally and this only needs to read it out on right-click.
+Per Stream 0's finding, "selected" is the text of whatever was right-clicked, not an arbitrary
+span: the mail pager's whole rendered body, a person card's one field value, a calendar item's
+title or description. Each surface exposes this as a plain `String` alongside its existing state —
+still not a new cross-cutting selection manager, just a different (coarser) answer to "what is
+selected" than Stream 1 originally assumed.
+
+**One real exception, found during implementation:** mail's compose body is a `text_editor`, not
+plain `text` — the one widget in the app edited through something other than `text_input`/a
+read-only renderer — and `text_editor::Content::selection()` genuinely returns the highlighted
+span. Compose (tagged `"mail-compose"`, distinct from the pager's `"mail-body"`) uses the real
+selection when there is one and falls back to the whole draft when there isn't, rather than always
+taking the coarse whole-field answer every other context is stuck with.
 
 ## Stream 2: The context menu
 
-**Problem:** no context-menu primitive exists anywhere in the stack today — checked directly:
-`noctalia-iced`'s `chrome.rs` has only the OS-level `SystemMenu` bound to a right-click on the
-*titlebar*, nothing for content regions.
+**Simplified during implementation: no new primitive needed.** A right-click menu is "pick one
+labeled action from a fuzzy-filterable list," which is exactly what `command-palette-plan.md`'s
+`Overlay`/`Picker<Command<Message>>` already is — so a context menu is a second *caller* of that
+same machinery (seeded from matching templates instead of keybound commands or loaded rows), not a
+new widget. This is the "juice composes" payoff the palette plan predicted rather than a plan of
+its own.
 
-**Files:** `../noctalia-iced` (a new generic context-menu primitive, following the same "juice
-lives in the library" precedent as `command-palette-plan.md`'s `Picker<T>`)
+**Files:** `crates/noctmalia/src/app.rs`
 
 ### 2.1 Right-click surfaces a menu
 Populated from `config.templates` (`config-plan.md`) filtered to ones whose `contexts` field
-matches the region right-clicked (mail-body, person-field, event-description).
+matches the region right-clicked (mail-body, mail-compose, person-field, event-description), or
+names none. No matching templates opens no menu, rather than an empty one.
 
 ### 2.2 Menu region vs. titlebar region
 This is a second, independent right-click surface from `chrome.rs`'s existing `SystemMenu` — one
@@ -71,11 +90,17 @@ region. They don't overlap in screen space and don't need to share implementatio
 boundary explicitly so a future reader doesn't assume there's one "the" context menu.
 
 ### 2.3 Running a template
-Shell-quote the selection into the configured argv as a single `Command::arg()` element — **never**
-through `sh -c` or any string-interpolated shell invocation; that distinction is what keeps
-command-injection out of this feature entirely, not something left to the implementer's judgment.
-Spawn, capture stdout, show it (toast for short output, a small scrollable panel for long). Give the
-spawned process a timeout so a hanging script can't freeze the UI waiting on it.
+Substitute the selection into `{selection}` and pass each argv element to `Command::arg()`
+directly — **never** through `sh -c` or any string-interpolated shell invocation; that distinction
+is what keeps command-injection out of this feature entirely, not something left to the
+implementer's judgment. Spawn via `tokio::process::Command` (not `std::process::Command` — capturing
+output and racing a timeout wants the async `Child`), capture stdout, and show it. Give the spawned
+process a timeout so a hanging script can't freeze the UI waiting on it.
+
+**Simplified during implementation:** always a toast, never a separate scrollable panel — output
+past a fixed character cap is cut with a `…` rather than growing a second UI surface for it. A
+panel for genuinely long output is real future work if a template ever needs one; nothing built so
+far does.
 
 ## Stream 3: Test
 
@@ -93,7 +118,8 @@ command for free once its registry exists — worth doing, not required.
 
 ## Risks
 
-- Stream 0 failing (no selection API) narrows this plan's mail-body scope; decide the fallback
-  before Streams 1–3, not during them.
 - Shell-quoting is exactly the kind of place a security bug hides — Stream 2.3's argv-only rule is
   the mitigation, stated explicitly rather than assumed.
+- The row/field-level "selection" (Stream 0's resolution) is a real scope reduction from what
+  want.md pictured — free-text highlighting. Worth revisiting as its own plan if a real selectable
+  text widget is ever built for `noctalia-iced`; not blocking this one.

@@ -72,6 +72,9 @@ fn alarm_message(data: &Value) -> String {
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    /// Right-clicked the description field, tagged `"event-description"`. Caught by
+    /// `App::update` before it reaches here — see `mail::Message::ContextMenu`'s doc comment.
+    ContextMenu(String, &'static str),
     Cals(calendar::Result<Vec<Cal>>),
     Items(u64, calendar::Result<Vec<Item>>),
     Toggle(String),
@@ -296,6 +299,7 @@ impl Calendar {
 
     pub fn update(&mut self, message: Message, shell: &mut Shell, now: Instant) -> Task<Message> {
         match message {
+            Message::ContextMenu(..) => {}
             Message::Cals(Ok(mut cals)) => {
                 cals.sort_by_key(|cal| cal.name.to_lowercase());
                 self.cals = cals;
@@ -1027,7 +1031,11 @@ impl Calendar {
             .align_y(Alignment::Center),
             dates,
             field("Location", None, &editor.event.location, Field::Location),
-            field("Description", None, &editor.event.description, Field::Description),
+            // No selection to read out of a right-click — `docs/context-commands-plan.md` §0 —
+            // so a template runs against the whole description, the same fallback every other
+            // plain `text_input` context uses.
+            mouse_area(field("Description", None, &editor.event.description, Field::Description))
+                .on_right_press(Message::ContextMenu(editor.event.description.clone(), "event-description")),
             recur_picker,
             reminders,
             attendees,

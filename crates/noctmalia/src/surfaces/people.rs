@@ -13,7 +13,7 @@ use iced::keyboard::{Key, Modifiers};
 use iced::widget::operation;
 use iced::widget::scrollable::{AbsoluteOffset, Viewport};
 use iced::widget::tooltip;
-use iced::widget::{button, column, container, row, scrollable, space, stack, text, text_input};
+use iced::widget::{button, column, container, mouse_area, row, scrollable, space, stack, text, text_input};
 use iced::{Alignment, Animation, Element, Length, Padding, Task, border};
 use noctalia_iced::keymap::{self, Keymap};
 use noctalia_iced::motion::{self, Replay};
@@ -137,6 +137,10 @@ pub enum Rows {
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    /// Right-clicked a field's value, tagged `"person-field"`. Caught by `App::update` before it
+    /// reaches here — see `mail::Message::ContextMenu`'s doc comment for why it's the whole value,
+    /// not a span.
+    ContextMenu(String, &'static str),
     Books(people::Result<Vec<AddressBook>>),
     /// Tagged with the generation that asked, so a slow search cannot overwrite a newer one.
     Loaded(u64, people::Result<Vec<Contact>>),
@@ -283,6 +287,7 @@ impl People {
 
     fn step(&mut self, message: Message, shell: &mut Shell, now: Instant) -> Task<Message> {
         match message {
+            Message::ContextMenu(..) => {}
             Message::Books(Ok(books)) => {
                 self.books = books;
                 if self.book.as_ref().is_some_and(|id| !self.books.iter().any(|book| &book.id == id)) {
@@ -1154,10 +1159,12 @@ fn field<'a>(glyph: char, label: &str, value: &str) -> Element<'a, Message> {
         lines = lines.push(text(label.to_string()).size(theme::FONT_MINI).color(theme::palette().on_surface_variant));
     }
     lines = lines.push(text(value.to_string()).size(theme::FONT_BODY).wrapping(text::Wrapping::WordOrGlyph));
-    row![widgets::icon(glyph, theme::FONT_BODY).color(theme::palette().on_surface_variant), lines]
+    let row = row![widgets::icon(glyph, theme::FONT_BODY).color(theme::palette().on_surface_variant), lines]
         .spacing(theme::SPACE_MD)
-        .align_y(Alignment::Center)
-        .into()
+        .align_y(Alignment::Center);
+    // No selection to read out of a right-click — `docs/context-commands-plan.md` §0 — so a
+    // template runs against the whole field's value, the same unit `field` already draws as one.
+    mouse_area(row).on_right_press(Message::ContextMenu(value.to_string(), "person-field")).into()
 }
 
 fn input<'a>(placeholder: &'a str, value: &str, field: Field) -> Element<'a, Message> {

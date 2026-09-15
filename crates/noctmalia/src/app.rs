@@ -63,6 +63,10 @@ pub enum Message {
     PaletteQuery(String),
     /// The backdrop was clicked, or Escape was pressed while a picker was open.
     PaletteDismiss,
+    /// A context-menu template was chosen, with its configured argv and the text it runs against.
+    RunTemplate(Vec<String>, String),
+    /// A template finished (or failed to even start, or timed out) — its stdout, or an error.
+    TemplateRan(Result<String, String>),
     People(people::Message),
     Mail(mail::Message),
     Calendar(calendar::Message),
@@ -253,6 +257,17 @@ impl App {
             }
             Message::PaletteQuery(text) => self.rescope_overlay(text),
             Message::PaletteDismiss => self.overlay = None,
+            Message::RunTemplate(argv, selection) => {
+                return Task::perform(run_template(argv, selection, TEMPLATE_TIMEOUT), Message::TemplateRan);
+            }
+            Message::TemplateRan(Ok(output)) => {
+                self.shell.announce(if output.is_empty() { "(no output)".to_string() } else { truncated(output) }, now)
+            }
+            Message::TemplateRan(Err(error)) => self.shell.fail(truncated(error), now),
+
+            Message::Mail(mail::Message::ContextMenu(text, context)) => return self.open_context_menu(text, context),
+            Message::People(people::Message::ContextMenu(text, context)) => return self.open_context_menu(text, context),
+            Message::Calendar(calendar::Message::ContextMenu(text, context)) => return self.open_context_menu(text, context),
 
             Message::People(message) => {
                 return self.people.update(message, &mut self.shell, now).map(Message::People);
@@ -326,6 +341,32 @@ impl App {
     fn open_overlay(&mut self, all: Vec<Command<Message>>) -> Task<Message> {
         let scoped: Vec<Command<Message>> = all.iter().filter(|command| command.surface == self.surface).cloned().collect();
         self.overlay = Some(Overlay { picker: Picker::new(scoped), all });
+        operation::focus(picker::query_id())
+    }
+
+    /// A right-click on `text`, tagged `context` (`"mail-body"`, `"mail-compose"`,
+    /// `"person-field"`, `"event-description"`). Populates a menu from `docs/config-plan.md`'s
+    /// templates whose own `contexts` matches this one, or names none (which means everywhere) —
+    /// `docs/context-commands-plan.md` Stream 2. No matching templates means nothing to show, not
+    /// an empty menu floating over nothing.
+    fn open_context_menu(&mut self, text: String, context: &'static str) -> Task<Message> {
+        let items: Vec<Command<Message>> = self
+            .config
+            .templates
+            .iter()
+            .filter(|template| template.contexts.is_empty() || template.contexts.iter().any(|c| c == context))
+            .map(|template| Command {
+                surface: self.surface,
+                label: template.name.clone(),
+                hint: None,
+                message: Message::RunTemplate(template.command.clone(), text.clone()),
+                exposed_to_socket: false,
+            })
+            .collect();
+        if items.is_empty() {
+            return Task::none();
+        }
+        self.overlay = Some(Overlay { picker: Picker::new(items.clone()), all: items });
         operation::focus(picker::query_id())
     }
 
@@ -459,6 +500,44 @@ impl App {
             );
         }
         bar.into()
+    }
+}
+
+/// A hung script cannot be allowed to freeze the UI waiting on it — `docs/context-commands-plan.md`
+/// §2.3.
+const TEMPLATE_TIMEOUT: Duration = Duration::from_secs(10);
+/// A toast is one line, not a document; long output is cut rather than growing the banner to fit.
+const TEMPLATE_OUTPUT_CAP: usize = 400;
+
+fn truncated(mut text: String) -> String {
+    if text.len() > TEMPLATE_OUTPUT_CAP {
+        text.truncate(TEMPLATE_OUTPUT_CAP);
+        text.push('…');
+    }
+    text
+}
+
+/// Runs a context-command template: `argv`, with every `{selection}` replaced by `selection` —
+/// substituted directly into the string and passed to `Command::arg()`, never through a shell, so
+/// there is no quoting to get wrong and no injection to guard against. `docs/context-commands-plan.md`
+/// §2.3. `timeout` is [`TEMPLATE_TIMEOUT`] in the app; a parameter here so a test can prove the
+/// timeout path fires without a real suite-slowing wait.
+async fn run_template(argv: Vec<String>, selection: String, timeout: Duration) -> Result<String, String> {
+    let args: Vec<String> = argv.iter().map(|arg| arg.replace("{selection}", &selection)).collect();
+    let Some((program, rest)) = args.split_first() else {
+        return Err("empty command template".to_string());
+    };
+    let mut command = tokio::process::Command::new(program);
+    command.args(rest).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    let child = command.spawn().map_err(|error| format!("{program}: {error}"))?;
+    let Ok(waited) = tokio::time::timeout(timeout, child.wait_with_output()).await else {
+        return Err(format!("{program}: timed out after {}s", timeout.as_secs()));
+    };
+    let output = waited.map_err(|error| format!("{program}: {error}"))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
     }
 }
 
@@ -669,5 +748,121 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         assert!(snapshot.matches_image(&path).expect("write the png"));
         eprintln!("wrote {}", path.display());
+    }
+
+    /// Same disclaimer as `shot_of_the_palette_open`.
+    #[test]
+    #[ignore = "writes a PNG rather than asserting"]
+    fn shot_of_a_context_menu_open() {
+        use iced::{Settings, Size};
+        let mut app = App::new(bridge());
+        app.config.templates = vec![
+            config::Template { name: "Look up".to_string(), command: vec!["dict".to_string(), "{selection}".to_string()], contexts: vec![] },
+            config::Template {
+                name: "Open in browser".to_string(),
+                command: vec!["xdg-open".to_string(), "{selection}".to_string()],
+                contexts: vec![],
+            },
+        ];
+        let _ = app.open_context_menu("the highlighted text".to_string(), "mail-body");
+        let element = app.view().map(|_| ());
+        let settings =
+            Settings { default_font: crate::font::ui(), fonts: vec![noctalia_iced::theme::ICON_FONT_BYTES.into()], ..Settings::default() };
+        let mut simulator = iced_test::Simulator::with_size(settings, Size::new(1180.0, 720.0), element);
+        let snapshot = simulator.snapshot(&Theme::Dark).expect("it draws");
+        let directory =
+            std::env::var("NOCTMALIA_SHOTS").unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/shots").to_string());
+        std::fs::create_dir_all(&directory).expect("somewhere to write to");
+        let path = std::path::Path::new(&directory).join("context-menu-open.png");
+        let _ = std::fs::remove_file(&path);
+        assert!(snapshot.matches_image(&path).expect("write the png"));
+        eprintln!("wrote {}", path.display());
+    }
+
+    // ── Context commands: docs/context-commands-plan.md §3 ──────────────────────────────
+
+    #[tokio::test]
+    async fn a_template_substitutes_the_selection_into_the_argv() {
+        let argv = vec!["/bin/echo".to_string(), "{selection}".to_string()];
+        let output = run_template(argv, "hello world".to_string(), Duration::from_secs(5)).await;
+        assert_eq!(output, Ok("hello world".to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_selection_full_of_shell_metacharacters_is_never_interpreted() {
+        // If this ever went through `sh -c`, `$(...)` would run and the echoed text would differ.
+        let selection = "$(echo pwned); rm -rf /nonexistent; `whoami` && true".to_string();
+        let argv = vec!["/bin/echo".to_string(), "{selection}".to_string()];
+        let output = run_template(argv, selection.clone(), Duration::from_secs(5)).await;
+        assert_eq!(output, Ok(selection), "the selection arrives exactly as typed, not evaluated");
+    }
+
+    #[tokio::test]
+    async fn a_failing_command_reports_its_stderr_as_the_error() {
+        let argv = vec!["/bin/sh".to_string(), "-c".to_string(), "echo nope >&2; exit 1".to_string()];
+        let output = run_template(argv, "unused".to_string(), Duration::from_secs(5)).await;
+        assert_eq!(output, Err("nope".to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_missing_program_reports_an_error_rather_than_panicking() {
+        let argv = vec!["/definitely/not/a/real/binary".to_string()];
+        let output = run_template(argv, "x".to_string(), Duration::from_secs(5)).await;
+        assert!(output.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_hanging_command_is_cut_off_by_the_timeout() {
+        let argv = vec!["/bin/sleep".to_string(), "5".to_string()];
+        let started = Instant::now();
+        let output = run_template(argv, "x".to_string(), Duration::from_millis(50)).await;
+        assert!(output.is_err(), "a timed-out template is an error, not a hang");
+        assert!(started.elapsed() < Duration::from_secs(2), "the short timeout won, not sleep's five seconds");
+    }
+
+    #[test]
+    fn output_past_the_cap_is_cut_with_a_marker() {
+        let long = "x".repeat(TEMPLATE_OUTPUT_CAP + 50);
+        let short = truncated(long);
+        assert_eq!(short.chars().count(), TEMPLATE_OUTPUT_CAP + 1, "the cap, plus the marker");
+        assert!(short.ends_with('…'));
+    }
+
+    #[test]
+    fn output_under_the_cap_is_untouched() {
+        assert_eq!(truncated("fine".to_string()), "fine");
+    }
+
+    #[test]
+    fn a_context_menu_is_built_only_from_templates_that_match_or_name_no_context() {
+        let mut app = App::new(bridge());
+        app.config.templates = vec![
+            config::Template { name: "Everywhere".to_string(), command: vec!["true".to_string()], contexts: vec![] },
+            config::Template {
+                name: "Mail only".to_string(),
+                command: vec!["true".to_string()],
+                contexts: vec!["mail-body".to_string()],
+            },
+            config::Template {
+                name: "People only".to_string(),
+                command: vec!["true".to_string()],
+                contexts: vec!["person-field".to_string()],
+            },
+        ];
+        let _ = app.open_context_menu("some text".to_string(), "mail-body");
+        let overlay = app.overlay.as_ref().expect("matching templates open a menu");
+        let labels: Vec<&str> = overlay.all.iter().map(|command| command.label.as_str()).collect();
+        assert!(labels.contains(&"Everywhere"));
+        assert!(labels.contains(&"Mail only"));
+        assert!(!labels.contains(&"People only"));
+    }
+
+    #[test]
+    fn a_context_with_no_matching_templates_opens_no_menu() {
+        let mut app = App::new(bridge());
+        app.config.templates =
+            vec![config::Template { name: "People only".to_string(), command: vec!["true".to_string()], contexts: vec!["person-field".to_string()] }];
+        let _ = app.open_context_menu("some text".to_string(), "mail-body");
+        assert!(app.overlay.is_none());
     }
 }

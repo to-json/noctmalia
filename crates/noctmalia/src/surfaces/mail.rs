@@ -30,7 +30,7 @@ use iced::advanced::widget::Id;
 use iced::keyboard::{Key, Modifiers};
 use iced::widget::scrollable::{AbsoluteOffset, Viewport};
 use iced::widget::{
-    column, container, markdown, operation, row, scrollable, space, stack, text, text_editor, text_input,
+    column, container, markdown, mouse_area, operation, row, scrollable, space, stack, text, text_editor, text_input,
 };
 use iced::{Alignment, Color, Element, Length, Padding, Task};
 use noctalia_iced::keymap::{self, Keymap};
@@ -82,6 +82,12 @@ const STAGGER_WINDOW: f32 = 0.35;
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    /// A right-click, with the text a template should run against and which context it came from
+    /// (`"mail-body"`, `"mail-compose"`) — caught and turned into a menu at the app level, not
+    /// here. `docs/context-commands-plan.md` §0: read-only text has no selection of its own in
+    /// this iced version, so the pager's text is the whole rendered body; compose is the one place
+    /// a real highlighted span (`text_editor::Content::selection()`) is possible at all.
+    ContextMenu(String, &'static str),
     Accounts(mail::Result<Vec<Account>>),
     Identities(mail::Result<Vec<Identity>>),
     Counts(mail::Result<(String, Counts)>),
@@ -727,6 +733,8 @@ impl Mail {
 
     fn step(&mut self, message: Message, shell: &mut Shell, now: Instant) -> Task<Message> {
         match message {
+            // Caught by `App::update` before it reaches here — see the variant's own doc comment.
+            Message::ContextMenu(..) => {}
             Message::Accounts(Ok(accounts)) => {
                 self.accounts = accounts;
                 self.rail = flatten(&self.accounts);
@@ -2233,6 +2241,9 @@ impl Mail {
             // Between selecting and parsing there is one frame; show the source rather than a gap.
             None => text(letter.body.markdown.clone()).size(theme::FONT_BODY).into(),
         };
+        // No selection to read out of a right-click — `docs/context-commands-plan.md` §0 — so the
+        // whole rendered body is what a template runs against, same as `\` shows the whole source.
+        let content = mouse_area(content).on_right_press(Message::ContextMenu(letter.body.markdown.clone(), "mail-body"));
         scrollable(container(content).padding(Padding { right: theme::SPACE_MD, ..Padding::ZERO }))
             .id(Id::new(PAGER_ID))
             .on_scroll(Message::PagerScrolled)
@@ -2329,6 +2340,13 @@ impl Mail {
                 style.background = theme::palette().surface.into();
                 style
             });
+        // The one place in the app where a right-click can read a real, arbitrary highlighted
+        // span rather than a whole field — `text_editor::Content::selection()` — because compose
+        // is the one place text is edited through `text_editor` rather than read through plain
+        // `text`. Nothing selected falls back to the whole draft, the same shape every other
+        // context menu already has.
+        let selected = composing.body.selection().unwrap_or_else(|| composing.body.text());
+        let body = mouse_area(body).on_right_press(Message::ContextMenu(selected, "mail-compose"));
 
         column![
             heading,

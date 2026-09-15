@@ -12,8 +12,11 @@
 # should look the same to write.
 #
 # `contexts` limits which surfaces' selections offer this template. Leave it out, or empty, to offer
-# it everywhere selection exists — the mail pager, a person's card fields, an event's description.
-# Recognised so far: "mail-body", "person-field", "event-description".
+# it everywhere selection exists — the mail pager, a compose draft, a person's card fields, an
+# event's description. Recognised so far: "mail-body", "mail-compose", "person-field",
+# "event-description". Only "mail-compose" can ever see less than the whole field: it is the one
+# place text is edited through a widget that tracks a real highlighted span, so a template there
+# runs against whatever is actually selected, falling back to the whole draft when nothing is.
 
 [[template]]
 name = "Look up"
