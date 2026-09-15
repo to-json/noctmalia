@@ -3,6 +3,7 @@
 Date: 2026-09-14
 Depends on: `command-palette-plan.md` (soft — the custom-command schema should match the
 registry's `Command` shape)
+Status: **Shipped 2026-09-15.**
 
 ---
 
