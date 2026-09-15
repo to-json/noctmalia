@@ -24,6 +24,7 @@ thunderbird --headless ── bridge (MailExtension) ── nm-shim ──►  n
 | `docs/findings.md` | What has actually been verified, and the gotchas behind it |
 | `docs/design.md` | Where this is going |
 | `docs/mail-plan.md` | The mail surface: the decisions, the milestones, and what building them changed |
+| `docs/want-sequence.md` | The lazyvim/fzf-feel wishlist (`want.md`), turned into six sequenced plans |
 
 ## Running it
 
