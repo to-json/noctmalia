@@ -20,6 +20,7 @@
 
 use crate::commands::Command;
 use crate::config;
+use crate::control;
 use crate::palette;
 use crate::shell::Shell;
 use crate::surfaces::{Pressed, Surface, calendar, mail, people};
@@ -35,7 +36,9 @@ use noctalia_iced::theme::{self, Palette};
 use noctmalia_bridge::{Bridge, Event};
 use std::cell::Cell;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
 /// The window the application asks for, and the size the layout assumes until the compositor has
 /// said otherwise — one configure later it is measuring the real thing.
@@ -67,6 +70,8 @@ pub enum Message {
     RunTemplate(Vec<String>, String),
     /// A template finished (or failed to even start, or timed out) — its stdout, or an error.
     TemplateRan(Result<String, String>),
+    /// A name the control socket accepted as a `run` request — `docs/scripting-socket-plan.md`.
+    ControlRun(String),
     People(people::Message),
     Mail(mail::Message),
     Calendar(calendar::Message),
@@ -105,9 +110,13 @@ pub struct App {
     global_pending: keymap::Pending,
     /// `docs/config-plan.md`. Read once at startup — nothing in the app changes it, and a change
     /// on disk takes another launch to be seen, which is fine for a file this small and this rare
-    /// to edit. Not read anywhere yet: `docs/context-commands-plan.md` is its first consumer.
-    #[allow(dead_code)]
+    /// to edit.
     config: config::Config,
+    /// The other end of `docs/scripting-socket-plan.md`'s control socket: names it has queued to
+    /// run, one per accepted `run` request. `Arc<AsyncMutex<..>>` because [`App::subscription`] is
+    /// `&self` and rebuilds this stream's identity on every call, but there is only ever one real
+    /// receiver — see [`control_feed`].
+    control: Arc<AsyncMutex<mpsc::UnboundedReceiver<String>>>,
     frames: Option<Frames>,
     /// Only the accent has to be held: the other roles are read straight out of the theme, but iced
     /// keeps `primary` in its own palette, so the `Theme` has to be rebuilt when it changes.
@@ -163,16 +172,30 @@ impl App {
         if let Some(error) = loaded.error {
             shell.fail(format!("config: {error}"), Instant::now());
         }
+        let people = people::People::new();
+        let mail = mail::Mail::new();
+        let calendar = calendar::Calendar::new();
+
+        // Computed now, before anything has loaded from the bridge, which is exactly what keeps
+        // this to state-independent commands: a fresh surface has no folders to build
+        // `Message::OpenFolder(id)` from, so nothing that needs one is in the registry at all.
+        let registry = socket_registry(&mail, &people, &calendar);
+        let (run_tx, run_rx) = mpsc::unbounded_channel();
+        if let Err(error) = control::spawn(registry, run_tx) {
+            eprintln!("noctmalia: control socket: {error}");
+        }
+
         App {
             chrome: chrome::initial(),
             shell,
             surface: Surface::Mail,
-            people: people::People::new(),
-            mail: mail::Mail::new(),
-            calendar: calendar::Calendar::new(),
+            people,
+            mail,
+            calendar,
             overlay: None,
             global_pending: keymap::Pending::default(),
             config: loaded.config,
+            control: Arc::new(AsyncMutex::new(run_rx)),
             frames: Frames::enabled(),
             accent: theme::palette().primary,
         }
@@ -193,6 +216,7 @@ impl App {
             iced::window::resize_events().map(|(_, size)| Message::Resized(size.width)),
             Subscription::run_with(Feed(self.shell.bridge()), feed),
             Subscription::run(palette_changes),
+            Subscription::run_with(ControlFeed(Arc::clone(&self.control)), control_feed),
         ];
         // iced re-reads the subscriptions after every message, so starting an animation in
         // `update` turns this on for exactly as long as it runs.
@@ -264,6 +288,16 @@ impl App {
                 self.shell.announce(if output.is_empty() { "(no output)".to_string() } else { truncated(output) }, now)
             }
             Message::TemplateRan(Err(error)) => self.shell.fail(truncated(error), now),
+            Message::ControlRun(name) => {
+                if let Some(message) = self.message_for_socket_name(&name) {
+                    return Task::done(message);
+                }
+                // The socket only ever queues a name from its own registry, so this is not a user
+                // mistake — either that registry drifted from `all_commands()`, or the surface
+                // that used to expose it no longer does. Either way there is nothing to run, and
+                // the toast says which name went looking for a home and found none.
+                self.shell.fail(format!("control: {name:?} is no longer available"), now);
+            }
 
             Message::Mail(mail::Message::ContextMenu(text, context)) => return self.open_context_menu(text, context),
             Message::People(people::Message::ContextMenu(text, context)) => return self.open_context_menu(text, context),
@@ -334,6 +368,14 @@ impl App {
             Command::from_entry(Surface::Calendar, entry.map(Message::Calendar))
         }));
         all
+    }
+
+    /// The message a control-socket `run` request for `name` actually sends, found the same way
+    /// the palette finds anything: the live, current `all_commands()` — not the socket's own
+    /// registry snapshot from startup, so a command that has since become unavailable is a clean
+    /// miss rather than a stale message built from data that no longer exists.
+    fn message_for_socket_name(&self, name: &str) -> Option<Message> {
+        self.all_commands().into_iter().find(|command| command.exposed_to_socket && command.label == name).map(|command| command.message)
     }
 
     /// Opens a picker seeded from `all`, scoped to the current surface — the un-prefixed state
@@ -503,6 +545,20 @@ impl App {
     }
 }
 
+/// What `control::spawn` is handed at startup: every command any surface has marked
+/// `exposed_to_socket`, by label. Computed from fresh surfaces before anything has loaded from the
+/// bridge — see the comment where this is called in [`App::new`] for why that is what keeps it to
+/// state-independent commands without naming them twice.
+fn socket_registry(mail: &mail::Mail, people: &people::People, calendar: &calendar::Calendar) -> Vec<control::Exposed> {
+    fn exposed<M>(entries: Vec<crate::commands::Entry<M>>) -> impl Iterator<Item = control::Exposed> {
+        entries
+            .into_iter()
+            .filter(|entry| entry.exposed_to_socket)
+            .map(|entry| control::Exposed { name: entry.label.clone(), label: entry.label })
+    }
+    exposed(mail.commands()).chain(exposed(people.commands())).chain(exposed(calendar.commands())).collect()
+}
+
 /// A hung script cannot be allowed to freeze the UI waiting on it — `docs/context-commands-plan.md`
 /// §2.3.
 const TEMPLATE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -607,6 +663,28 @@ fn feed(feed: &Feed) -> impl iced::futures::Stream<Item = Message> + use<> {
     let events = feed.0.subscribe();
     iced::futures::stream::unfold(events, |mut events| async move {
         events.next().await.map(|event| (Message::Bridge(event), events))
+    })
+}
+
+/// Wraps the one control-socket receiver so `Subscription::run_with` can key a stable identity off
+/// it. `App::subscription` constructs a fresh `ControlFeed` on every call — cloning the `Arc`, not
+/// the receiver inside it — since there is exactly one receiver for the socket thread's one
+/// sender, unlike [`Feed`]'s broadcast channel, which hands out a new one per subscriber.
+struct ControlFeed(Arc<AsyncMutex<mpsc::UnboundedReceiver<String>>>);
+
+impl Hash for ControlFeed {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // Only one of these ever exists per process, so any constant discriminates it from the
+        // application's other subscriptions without needing to hash the receiver itself.
+        "control".hash(state);
+    }
+}
+
+fn control_feed(feed: &ControlFeed) -> impl iced::futures::Stream<Item = Message> + use<> {
+    let receiver = Arc::clone(&feed.0);
+    iced::futures::stream::unfold(receiver, |receiver| async move {
+        let name = receiver.lock().await.recv().await?;
+        Some((Message::ControlRun(name), receiver))
     })
 }
 

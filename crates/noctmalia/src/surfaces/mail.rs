@@ -540,13 +540,13 @@ impl Mail {
             Entry::new("Reply", Some("r"), Message::Compose(Some(Reply::Sender))),
             Entry::new("Reply all", Some("R"), Message::Compose(Some(Reply::All))),
             Entry::new("Forward", Some("f"), Message::Compose(Some(Reply::Forward))),
-            Entry::new("Search", Some("/"), Message::Search),
+            Entry::new("Search", Some("/"), Message::Search).exposed(),
             Entry::new("Show raw source", Some("\\"), Message::Show(Showing::Source)),
             Entry::new("Show headers", Some("H"), Message::Show(Showing::Headers)),
             Entry::new("Show security surface", Some("!"), Message::Show(Showing::Security)),
             Entry::new("Open elsewhere", Some("O"), Message::External),
             Entry::new("Propose a screening rule", Some("S"), Message::Screen),
-            Entry::new("Refresh", Some("<C-r>"), Message::Refresh),
+            Entry::new("Refresh", Some("<C-r>"), Message::Refresh).exposed(),
         ];
         for (label, purpose, hint) in [
             ("Go to Inbox", "inbox", "g i"),

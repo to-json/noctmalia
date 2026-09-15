@@ -17,18 +17,30 @@ pub struct Entry<M> {
     pub label: String,
     pub hint: Option<&'static str>,
     pub message: M,
+    /// Whether `docs/scripting-socket-plan.md`'s control socket may run this by name. `false` on
+    /// every `Entry::new` — a surface opts a specific entry in with [`Entry::exposed`], one at a
+    /// time, rather than the registry's exhaustiveness deciding the socket's trust boundary.
+    pub exposed_to_socket: bool,
 }
 
 impl<M> Entry<M> {
     pub fn new(label: impl Into<String>, hint: Option<&'static str>, message: M) -> Entry<M> {
-        Entry { label: label.into(), hint, message }
+        Entry { label: label.into(), hint, message, exposed_to_socket: false }
     }
 
-    /// Carries the label and hint over to an [`Entry`] of the message the application actually
-    /// sends — `app::Message::Mail`, say — the way [`crate::surfaces::Pressed`] does for a key
-    /// press.
+    /// Marks this entry runnable over the control socket. Reach for this only for something
+    /// read-only or navigational — `docs/scripting-socket-plan.md`'s own rule is that mutating
+    /// actions (send, delete, discard) get opted in individually and deliberately, not by default.
+    pub fn exposed(mut self) -> Entry<M> {
+        self.exposed_to_socket = true;
+        self
+    }
+
+    /// Carries the label, hint and exposure over to an [`Entry`] of the message the application
+    /// actually sends — `app::Message::Mail`, say — the way [`crate::surfaces::Pressed`] does for
+    /// a key press.
     pub fn map<M2>(self, f: impl FnOnce(M) -> M2) -> Entry<M2> {
-        Entry { label: self.label, hint: self.hint, message: f(self.message) }
+        Entry { label: self.label, hint: self.hint, message: f(self.message), exposed_to_socket: self.exposed_to_socket }
     }
 }
 
@@ -50,7 +62,7 @@ pub struct Command<M> {
 
 impl<M> Command<M> {
     pub fn from_entry(surface: Surface, entry: Entry<M>) -> Command<M> {
-        Command { surface, label: entry.label, hint: entry.hint, message: entry.message, exposed_to_socket: false }
+        Command { surface, label: entry.label, hint: entry.hint, message: entry.message, exposed_to_socket: entry.exposed_to_socket }
     }
 }
 
@@ -73,5 +85,12 @@ mod tests {
         let command = Command::from_entry(Surface::Mail, entry);
         assert!(!command.exposed_to_socket, "docs/scripting-socket-plan.md opts commands in one at a time");
         assert_eq!(command.surface, Surface::Mail);
+    }
+
+    #[test]
+    fn exposed_carries_through_a_map() {
+        let entry = Entry::new("Refresh", None, 1).exposed();
+        let command = Command::from_entry(Surface::Mail, entry.map(|n| n * 10));
+        assert!(command.exposed_to_socket);
     }
 }

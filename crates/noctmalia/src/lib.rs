@@ -18,6 +18,7 @@ pub mod base64;
 pub mod calendar;
 pub mod commands;
 pub mod config;
+pub mod control;
 pub mod font;
 pub mod ical;
 pub mod mail;

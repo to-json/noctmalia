@@ -632,7 +632,7 @@ impl People {
     pub fn commands(&self) -> Vec<crate::commands::Entry<Message>> {
         use crate::commands::Entry;
         vec![
-            Entry::new("Search", Some("/"), Message::Search),
+            Entry::new("Search", Some("/"), Message::Search).exposed(),
             Entry::new("New contact", Some("n"), Message::New),
             Entry::new("Edit contact", Some("e"), Message::Edit),
             Entry::new("Save", Some("<C-s>"), Message::Save),

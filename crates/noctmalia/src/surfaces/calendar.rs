@@ -545,14 +545,14 @@ impl Calendar {
     pub fn commands(&self) -> Vec<crate::commands::Entry<Message>> {
         use crate::commands::Entry;
         vec![
-            Entry::new("Jump to today", Some("t"), Message::Today),
+            Entry::new("Jump to today", Some("t"), Message::Today).exposed(),
             Entry::new("New event", Some("n"), Message::New(self.anchor, Some(9))),
-            Entry::new("Month view", Some("m"), Message::View(ViewKind::Month)),
-            Entry::new("Week view", Some("w"), Message::View(ViewKind::Week)),
-            Entry::new("Day view", Some("d"), Message::View(ViewKind::Day)),
-            Entry::new("Agenda view", Some("a"), Message::View(ViewKind::Agenda)),
+            Entry::new("Month view", Some("m"), Message::View(ViewKind::Month)).exposed(),
+            Entry::new("Week view", Some("w"), Message::View(ViewKind::Week)).exposed(),
+            Entry::new("Day view", Some("d"), Message::View(ViewKind::Day)).exposed(),
+            Entry::new("Agenda view", Some("a"), Message::View(ViewKind::Agenda)).exposed(),
             Entry::new("Save event", Some("<C-CR>"), Message::Save),
-            Entry::new("Refresh", Some("<C-r>"), Message::Refresh),
+            Entry::new("Refresh", Some("<C-r>"), Message::Refresh).exposed(),
         ]
     }
 
