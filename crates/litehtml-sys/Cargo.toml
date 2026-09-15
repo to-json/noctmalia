@@ -1,0 +1,13 @@
+[package]
+name = "litehtml-sys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# See docs/html-mail-plan.md Stream 0/1. This crate is the FFI boundary only — a C++ shim
+# implementing litehtml's `document_container` and a flat `extern "C"` surface over it. Nothing
+# here should know about mail, iced, or noctmalia's own types; those live in the crate that
+# consumes this one.
+
+[build-dependencies]
+cc = "1"

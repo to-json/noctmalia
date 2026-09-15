@@ -24,7 +24,15 @@
             pkg-config
             just # the justfile, for anyone who does not have it on the host
             python3 # tools/fake-bridge.py, which the contacts tests drive
+            litehtml # dev headers + static lib for litehtml-sys's build.rs, see docs/html-mail-plan.md
+            gumbo # litehtml's own HTML5 parser dependency — liblitehtml.a doesn't bundle it
           ];
+
+          # litehtml has no pkg-config file (checked: nixpkgs' derivation ships only cmake config
+          # files), so litehtml-sys/build.rs reads this directly instead of shelling out to
+          # pkg-config or cmake.
+          LITEHTML_ROOT = pkgs.litehtml;
+          GUMBO_ROOT = pkgs.gumbo;
 
           # iced reaches the GPU through Mesa. Binaries built here link nix's glibc and loader, so
           # they cannot load the system's /usr/lib/dri drivers — nix's Mesa has to be on the path

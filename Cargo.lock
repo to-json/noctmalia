@@ -1691,6 +1691,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
+name = "litehtml-sys"
+version = "0.1.0"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "litrs"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1943,8 +1950,10 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "iced",
+ "iced_graphics",
  "iced_selector",
  "iced_test",
+ "litehtml-sys",
  "noctalia-iced",
  "noctmalia-bridge",
  "serde",
