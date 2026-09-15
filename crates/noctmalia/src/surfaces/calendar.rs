@@ -130,6 +130,7 @@ enum Binding {
     Day,
     Agenda,
     Refresh,
+    Save,
     Escape,
     Go(Surface),
 }
@@ -138,6 +139,7 @@ thread_local! {
     static KEYS: Keymap<Binding> = surfaces::switches(
         Keymap::new()
             .counted()
+            .bind("<C-CR>", Binding::Save)
             .bind("t", Binding::Today)
             .bind("j", Binding::Next)
             .bind("<Down>", Binding::Next)
@@ -503,6 +505,7 @@ impl Calendar {
                 Binding::Day => Message::View(ViewKind::Day),
                 Binding::Agenda => Message::View(ViewKind::Agenda),
                 Binding::Refresh => Message::Refresh,
+                Binding::Save => Message::Save,
                 Binding::Escape => Message::Escape,
                 Binding::Go(_) => unreachable!("handled above"),
             }),
