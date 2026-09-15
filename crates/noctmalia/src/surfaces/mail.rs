@@ -24,7 +24,7 @@
 use crate::mail::{self, Account, Counts, Draft, Flags, Folder, Header, Identity, Letter, Reply, Screen};
 use crate::mime;
 use crate::shell::Shell;
-use crate::surfaces::{self, Pressed, Surface};
+use crate::surfaces::{self, Pressed, Surface, html_view};
 use crate::ui::{self, ROW_GAP, icon};
 use iced::advanced::widget::Id;
 use iced::keyboard::{Key, Modifiers};
@@ -171,6 +171,9 @@ pub enum Showing {
     Security,
     /// The bytes exactly as they arrived.
     Source,
+    /// Real HTML/CSS layout via litehtml, instead of the Markdown downconversion — an explicit
+    /// opt-in per letter. See `docs/html-mail-plan.md`.
+    Original,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -211,6 +214,7 @@ enum Binding {
     Headers,
     Security,
     Letter,
+    Original,
     OpenElsewhere,
     Screen,
     Refresh,
@@ -268,6 +272,7 @@ thread_local! {
             .bind("\\", Binding::Source)
             .bind("H", Binding::Headers)
             .bind("!", Binding::Security)
+            .bind("o", Binding::Original)
             .bind("S", Binding::Screen)
             .bind("O", Binding::OpenElsewhere),
     );
@@ -301,6 +306,7 @@ thread_local! {
             .bind("H", Binding::Headers)
             .bind("!", Binding::Security)
             .bind("v", Binding::Letter)
+            .bind("o", Binding::Original)
             .bind("S", Binding::Screen)
             .bind("O", Binding::OpenElsewhere),
     );
@@ -551,6 +557,7 @@ impl Mail {
             Entry::new("Show raw source", Some("\\"), Message::Show(Showing::Source)),
             Entry::new("Show headers", Some("H"), Message::Show(Showing::Headers)),
             Entry::new("Show security surface", Some("!"), Message::Show(Showing::Security)),
+            Entry::new("Show original formatting", Some("o"), Message::Show(Showing::Original)),
             Entry::new("Open elsewhere", Some("O"), Message::External),
             Entry::new("Propose a screening rule", Some("S"), Message::Screen),
             Entry::new("Refresh", Some("<C-r>"), Message::Refresh).exposed(),
@@ -692,6 +699,7 @@ impl Mail {
             Binding::Forward => Message::Compose(Some(Reply::Forward)),
             Binding::Search => Message::Search,
             Binding::Source => Message::Show(Showing::Source),
+            Binding::Original => Message::Show(Showing::Original),
             Binding::Headers => Message::Show(Showing::Headers),
             Binding::Security => Message::Show(Showing::Security),
             Binding::Letter => Message::Show(Showing::Letter),
@@ -2135,6 +2143,7 @@ impl Mail {
             (Showing::Headers, Some(letter)) => headers_view(letter),
             (Showing::Security, Some(letter)) => security_view(letter),
             (Showing::Source, Some(_)) => self.source_view(id),
+            (Showing::Original, Some(letter)) => original_view(letter),
         };
 
         let mut pane = column![self.envelope(header, letter), ui::hairline_x(), body].spacing(theme::SPACE_MD);
@@ -2216,14 +2225,14 @@ impl Mail {
                 .spacing(theme::SPACE_MD)
                 .align_y(Alignment::Center),
             badges,
-            self.verbs(),
+            self.verbs(letter),
         ]
         .spacing(theme::SPACE_SM)
         .into()
     }
 
     /// The things you do to a message you have just read.
-    fn verbs(&self) -> Element<'_, Message> {
+    fn verbs(&self, letter: Option<&Letter>) -> Element<'_, Message> {
         let showing = self.showing;
         let mut bar = row![
             ui::icon_button(icon::CORNER_UP_LEFT, "Reply  ·  r", false, Message::Compose(Some(Reply::Sender))),
@@ -2235,18 +2244,30 @@ impl Mail {
             ui::icon_button(icon::FLAG, "Flag  ·  s", false, Message::Flag),
             ui::icon_button(icon::FILTER, "Make a rule from this  ·  S", false, Message::Screen),
             space().width(Length::Fill),
+        ]
+        .spacing(theme::SPACE_XS)
+        .align_y(Alignment::Center);
+        // Only a letter that actually arrived as HTML has an "as sent" to show — offering this for
+        // plain text or Markdown mail would toggle into a blank pane.
+        if letter.is_some_and(|letter| letter.body.raw_html.is_some()) {
+            bar = bar.push(ui::icon_button(
+                icon::EYE,
+                "Original formatting  ·  o",
+                showing == Showing::Original,
+                Message::Show(Showing::Original),
+            ));
+        }
+        bar = bar.extend([
             ui::icon_button(
                 icon::SHIELD,
                 "What this gives away  ·  !",
                 showing == Showing::Security,
-                Message::Show(Showing::Security)
+                Message::Show(Showing::Security),
             ),
             ui::icon_button(icon::LIST, "Headers  ·  H", showing == Showing::Headers, Message::Show(Showing::Headers)),
             ui::icon_button(icon::CODE, "Source  ·  \\", showing == Showing::Source, Message::Show(Showing::Source)),
             ui::icon_button(icon::EXTERNAL_LINK, "Open elsewhere  ·  O", false, Message::External),
-        ]
-        .spacing(theme::SPACE_XS)
-        .align_y(Alignment::Center);
+        ]);
         if self.undo.is_some() {
             bar = bar.push(ui::icon_button(icon::ARROW_BACK_UP, "Undo  ·  u", false, Message::Undo));
         }
@@ -2473,6 +2494,24 @@ fn level_colour(level: mime::headers::Level) -> Color {
 }
 
 /// Every header, with the ones worth reading first.
+/// Real CSS layout, for the letter the user explicitly asked to see "as sent" instead of
+/// downconverted to Markdown. `letter.body.raw_html` only exists for [`mime::Flavour::Html`]
+/// letters (`mime/mod.rs`) — a plain-text or Markdown message has nothing this mode adds.
+fn original_view(letter: &Letter) -> Element<'_, Message> {
+    let Some(html) = letter.body.raw_html.as_deref() else {
+        return container(ui::caption("This message didn't arrive as HTML — nothing to show differently."))
+            .center_x(Length::Fill)
+            .padding(theme::SPACE_LG)
+            .into();
+    };
+    scrollable(container(html_view::view(html)).padding(Padding { right: theme::SPACE_MD, ..Padding::ZERO }))
+        .id(Id::new(PAGER_ID))
+        .on_scroll(Message::PagerScrolled)
+        .style(theme::scrollable_style)
+        .height(Length::Fill)
+        .into()
+}
+
 fn headers_view(letter: &Letter) -> Element<'_, Message> {
     let palette = theme::palette();
     let mut rows = column![].spacing(theme::SPACE_XS);

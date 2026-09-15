@@ -333,6 +333,9 @@ fn every_surface_has_its_picture_taken() {
     let _ = mail.update(Message::Select(1), &mut shell, now);
     shot("mail-newsletter", mail.view(&shell, then).map(|_| ()));
 
+    let _ = mail.update(Message::Show(Showing::Original), &mut shell, now);
+    shot("mail-original", mail.view(&shell, then).map(|_| ()));
+
     let _ = mail.update(Message::Show(Showing::Headers), &mut shell, now);
     shot("mail-headers", mail.view(&shell, then).map(|_| ()));
 

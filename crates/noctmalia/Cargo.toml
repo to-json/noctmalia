@@ -21,10 +21,15 @@ path = "src/main.rs"
 
 [dependencies]
 noctmalia-bridge.workspace = true
+litehtml-sys = { path = "../litehtml-sys" }
 chrono.workspace = true
 chrono-tz.workspace = true
 noctalia-iced.workspace = true
 iced.workspace = true
+# For real text-width measurement in `surfaces::html_view` — see litehtml-sys's `render` callback.
+# Not re-exported by the top-level `iced` crate, so this is a direct dependency; pinned to the exact
+# version `iced` 0.14 itself resolves to, since it must share the same global font system.
+iced_graphics = "=0.14.0"
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true

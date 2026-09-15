@@ -6,6 +6,7 @@
 //! what they share is [`crate::shell::Shell`], the pieces in [`crate::ui`], and this enum.
 
 pub mod calendar;
+mod html_view;
 pub mod mail;
 pub mod people;
 

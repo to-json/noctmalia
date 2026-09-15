@@ -100,6 +100,11 @@ pub struct Body {
     pub trackers: usize,
     /// Links whose words claim one destination and whose `href` is another.
     pub misleading: Vec<html::Misleading>,
+    /// The untouched HTML, when [`Flavour::Html`] — what "original formatting" mode renders
+    /// instead of `markdown`. `trackers`/`images`/`misleading` above are computed from this same
+    /// text regardless of which mode the reader is in, so detection doesn't vary by render choice.
+    /// See `docs/html-mail-plan.md` Stream 4.1.
+    pub raw_html: Option<String>,
 }
 
 /// A plain-text part below this length, next to an HTML one, is a placeholder rather than the
@@ -126,6 +131,7 @@ fn render(part: &Part) -> Body {
                 images: converted.images,
                 trackers: converted.trackers,
                 misleading: converted.misleading,
+                raw_html: Some(text.to_string()),
             }
         }
         media => {
