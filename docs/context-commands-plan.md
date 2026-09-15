@@ -2,6 +2,7 @@
 
 Date: 2026-09-14
 Depends on: `config-plan.md` (hard — templates are config entries)
+Status: **Shipped 2026-09-15.**
 
 ---
 
