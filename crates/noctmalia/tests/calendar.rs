@@ -1,6 +1,6 @@
 //! Calendar against `tools/fake-bridge.py`, over a real socket.
 //!
-//! Like `tests/contacts.rs`, this is where method names and parameter spellings get checked —
+//! Like `tests/people.rs`, this is where method names and parameter spellings get checked —
 //! `calendarId`, `rangeStart`/`rangeEnd`, `format`/`item` — against a stand-in, not against
 //! Thunderbird itself. `tools/smoke.sh`'s "calendar round trip" is what proves the real thing
 //! accepts the same ICAL text and expands recurrence; the stand-in does not expand it (see

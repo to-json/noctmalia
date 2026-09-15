@@ -1,6 +1,6 @@
 //! The window: one process, one bridge, and whichever surface is in front.
 //!
-//! This file is the part that is not mail and not contacts. It owns the window chrome, the
+//! This file is the part that is not mail and not people. It owns the window chrome, the
 //! palette, the bridge connection, the surface switcher, and the keyboard — and then hands each
 //! message to whichever surface it belongs to. Everything with an opinion about what is on screen
 //! lives in [`crate::surfaces`].
@@ -20,7 +20,7 @@
 
 use crate::palette;
 use crate::shell::Shell;
-use crate::surfaces::{Pressed, Surface, calendar, contacts, mail};
+use crate::surfaces::{Pressed, Surface, calendar, mail, people};
 use crate::ui;
 use iced::keyboard::{self, Key, Modifiers, key::Named};
 use iced::widget::operation;
@@ -55,7 +55,7 @@ pub enum Message {
     Frame,
     /// The Noctalia shell's palette changed.
     Palette(Palette),
-    Contacts(contacts::Message),
+    People(people::Message),
     Mail(mail::Message),
     Calendar(calendar::Message),
 }
@@ -64,7 +64,7 @@ pub struct App {
     chrome: chrome::Chrome,
     shell: Shell,
     surface: Surface,
-    contacts: contacts::Contacts,
+    people: people::People,
     mail: mail::Mail,
     calendar: calendar::Calendar,
     frames: Option<Frames>,
@@ -121,7 +121,7 @@ impl App {
             chrome: chrome::initial(),
             shell: Shell::new(bridge, WINDOW.width),
             surface: Surface::Mail,
-            contacts: contacts::Contacts::new(),
+            people: people::People::new(),
             mail: mail::Mail::new(),
             calendar: calendar::Calendar::new(),
             frames: Frames::enabled(),
@@ -149,7 +149,7 @@ impl App {
         // `update` turns this on for exactly as long as it runs.
         let now = Instant::now();
         let animating = self.shell.animating(now)
-            || self.contacts.animating(now)
+            || self.people.animating(now)
             || self.mail.animating(now)
             || self.calendar.animating(now);
         if animating || self.frames.as_ref().is_some_and(|frames| frames.drive) {
@@ -186,7 +186,7 @@ impl App {
             Message::Bridge(Event::Lagged(_)) => return self.resync(),
             Message::Bridge(Event::Notify { name, data }) => {
                 return Task::batch([
-                    self.contacts.notify(&name, &self.shell).map(Message::Contacts),
+                    self.people.notify(&name, &self.shell).map(Message::People),
                     self.mail.notify(&name, &data, &self.shell).map(Message::Mail),
                     self.calendar.notify(&name, &data, &self.shell).map(Message::Calendar),
                 ]);
@@ -207,8 +207,8 @@ impl App {
                 self.accent = palette.primary;
             }
 
-            Message::Contacts(message) => {
-                return self.contacts.update(message, &mut self.shell, now).map(Message::Contacts);
+            Message::People(message) => {
+                return self.people.update(message, &mut self.shell, now).map(Message::People);
             }
             Message::Mail(message) => {
                 return self.mail.update(message, &mut self.shell, now).map(Message::Mail);
@@ -224,7 +224,7 @@ impl App {
     fn resync(&mut self) -> Task<Message> {
         Task::batch([
             self.mail.resync(&self.shell).map(Message::Mail),
-            self.contacts.resync(&self.shell).map(Message::Contacts),
+            self.people.resync(&self.shell).map(Message::People),
             self.calendar.resync(&self.shell).map(Message::Calendar),
         ])
     }
@@ -239,7 +239,7 @@ impl App {
         // rather than like a redraw.
         match surface {
             Surface::Mail => self.mail.entered(now),
-            Surface::Contacts => self.contacts.entered(now),
+            Surface::People => self.people.entered(now),
             Surface::Calendar => self.calendar.entered(now),
         }
         Task::none()
@@ -260,7 +260,7 @@ impl App {
         }
         let pressed = match self.surface {
             Surface::Mail => wrap(self.mail.press(&key, modifiers), Message::Mail),
-            Surface::Contacts => wrap(self.contacts.press(&key, modifiers), Message::Contacts),
+            Surface::People => wrap(self.people.press(&key, modifiers), Message::People),
             Surface::Calendar => wrap(self.calendar.press(&key, modifiers), Message::Calendar),
         };
         match pressed {
@@ -285,7 +285,7 @@ impl App {
         let body: Element<Message> = if self.shell.connected() {
             let surface = match self.surface {
                 Surface::Mail => self.mail.view(&self.shell, now).map(Message::Mail),
-                Surface::Contacts => self.contacts.view(&self.shell, now).map(Message::Contacts),
+                Surface::People => self.people.view(&self.shell, now).map(Message::People),
                 Surface::Calendar => self.calendar.view(&self.shell, now).map(Message::Calendar),
             };
             column![container(surface).height(Length::Fill), self.shell.notice(now, Message::Dismiss)].into()
@@ -306,7 +306,7 @@ impl App {
         // whole of the modal feedback, and it is one line of text.
         let typed = match self.surface {
             Surface::Mail => self.mail.typed(),
-            Surface::Contacts => self.contacts.typed(),
+            Surface::People => self.people.typed(),
             Surface::Calendar => self.calendar.typed(),
         };
         if !typed.is_empty() {

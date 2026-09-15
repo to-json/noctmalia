@@ -248,7 +248,7 @@ out.
   the real mail surface out headlessly and asserts that a newsletter full of beacons puts no tracker
   URL on screen, and that a folder of five thousand messages builds a screenful of rows rather than
   five thousand.
-- **Keyboard:** see [Mail](#mail). In contacts, `j`/`k` and the arrows move, `gg`/`G` jump, `/`
+- **Keyboard:** see [Mail](#mail). In People, `j`/`k` and the arrows move, `gg`/`G` jump, `/`
   searches, `n`/`e` start and edit, ctrl+S saves, Tab walks the editor's fields, Escape backs out.
   A focused text field keeps its own keys — iced reports a press a widget consumed, and the keymap
   never sees it.

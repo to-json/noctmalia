@@ -1,6 +1,6 @@
 //! The rolodex: address books on the left, contacts in the middle, one card on the right.
 
-use crate::contacts::{self, AddressBook, Contact};
+use crate::people::{self, AddressBook, Contact};
 use crate::shell::Shell;
 use crate::surfaces::{self, Pressed, Surface};
 use crate::ui::{
@@ -137,9 +137,9 @@ pub enum Rows {
 
 #[derive(Debug, Clone)]
 pub enum Message {
-    Books(contacts::Result<Vec<AddressBook>>),
+    Books(people::Result<Vec<AddressBook>>),
     /// Tagged with the generation that asked, so a slow search cannot overwrite a newer one.
-    Contacts(u64, contacts::Result<Vec<Contact>>),
+    Loaded(u64, people::Result<Vec<Contact>>),
     SelectBook(Option<String>),
     Query(String),
     Select(String),
@@ -150,10 +150,10 @@ pub enum Message {
     Add(Rows),
     Remove(Rows, usize),
     Save,
-    Saved(contacts::Result<String>),
+    Saved(people::Result<String>),
     AskDelete,
     Delete,
-    Deleted(contacts::Result<()>),
+    Deleted(people::Result<()>),
     /// Move focus through the editor's fields: true forwards, false back.
     Traverse(bool),
     /// Move the selection through the contact list: negative up, positive down.
@@ -229,7 +229,7 @@ struct Editor {
     card: Card,
 }
 
-pub struct Contacts {
+pub struct People {
     loading: bool,
     books: Vec<AddressBook>,
     /// The selected book, or `None` for all of them.
@@ -247,15 +247,15 @@ pub struct Contacts {
     motion: Motion,
 }
 
-impl Default for Contacts {
-    fn default() -> Contacts {
-        Contacts::new()
+impl Default for People {
+    fn default() -> People {
+        People::new()
     }
 }
 
-impl Contacts {
-    pub fn new() -> Contacts {
-        Contacts {
+impl People {
+    pub fn new() -> People {
+        People {
             loading: false,
             books: Vec::new(),
             book: None,
@@ -295,7 +295,7 @@ impl Contacts {
             }
             Message::Books(Err(error)) => shell.fail(error, now),
 
-            Message::Contacts(generation, result) => {
+            Message::Loaded(generation, result) => {
                 // A reply from a search the user has already typed past.
                 if generation != self.generation {
                     return Task::none();
@@ -404,10 +404,10 @@ impl Contacts {
                 let vcard = editor.card.to_vcard();
                 let bridge = shell.bridge();
                 return match editor.id.clone() {
-                    Some(id) => Task::perform(contacts::update(bridge, id, vcard), Message::Saved),
+                    Some(id) => Task::perform(people::update(bridge, id, vcard), Message::Saved),
                     None => {
                         let book = editor.book.clone();
-                        Task::perform(contacts::create(bridge, book, vcard), Message::Saved)
+                        Task::perform(people::create(bridge, book, vcard), Message::Saved)
                     }
                 };
             }
@@ -425,7 +425,7 @@ impl Contacts {
             Message::Delete => {
                 self.confirming_delete = false;
                 if let Some(id) = self.selected.clone() {
-                    return Task::perform(contacts::delete(shell.bridge(), id), Message::Deleted);
+                    return Task::perform(people::delete(shell.bridge(), id), Message::Deleted);
                 }
             }
             Message::Deleted(Ok(())) => {
@@ -618,7 +618,7 @@ impl Contacts {
     /// Everything again, from nothing. Thunderbird saying hello is also Thunderbird having
     /// restarted under a live socket, so this is a resync rather than a first load.
     pub fn resync(&mut self, shell: &Shell) -> Task<Message> {
-        Task::perform(contacts::books(shell.bridge()), Message::Books)
+        Task::perform(people::books(shell.bridge()), Message::Books)
     }
 
     /// A forwarded Thunderbird event. Any address-book change invalidates the list; a rolodex is
@@ -641,12 +641,12 @@ impl Contacts {
         self.loading = true;
         let load = async move {
             if query.is_empty() {
-                contacts::list(bridge, book, books).await
+                people::list(bridge, book, books).await
             } else {
-                contacts::search(bridge, query, book).await
+                people::search(bridge, query, book).await
             }
         };
-        Task::perform(load, move |result| Message::Contacts(generation, result))
+        Task::perform(load, move |result| Message::Loaded(generation, result))
     }
 
     pub fn view(&self, shell: &Shell, now: Instant) -> Element<'_, Message> {

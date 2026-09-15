@@ -1,11 +1,12 @@
-//! Contacts against `tools/fake-bridge.py`, over a real socket.
+//! `crate::people` (Thunderbird's contacts and address books) against `tools/fake-bridge.py`, over
+//! a real socket.
 //!
 //! This is where the method names and parameter spellings get checked: `parentId` and `contactId`
 //! and `vCard` are what the bridge expects, and a typo in any of them only shows up as a
 //! MethodNotFound or a silently empty list. Thunderbird itself is not involved — see `tools/smoke.sh`
 //! for that — but everything between the UI and the wire is.
 
-use noctmalia::contacts::{self, AddressBook};
+use noctmalia::people::{self, AddressBook};
 use noctmalia::vcard::{self, Entry};
 use noctmalia_bridge::{Bridge, Event};
 use std::path::PathBuf;
@@ -33,7 +34,7 @@ impl Drop for Socket {
 /// Brings up a bridge with the fake attached, or skips the test where python is missing.
 async fn attached(name: &str) -> Option<(Bridge, Vec<AddressBook>, Fake, Socket)> {
     let mut path = std::env::temp_dir();
-    path.push(format!("noctmalia-contacts-{}-{}.sock", name, std::process::id()));
+    path.push(format!("noctmalia-people-{}-{}.sock", name, std::process::id()));
     let socket = Socket(path);
 
     let bridge = Bridge::spawn(&socket.0).expect("spawn");
@@ -63,7 +64,7 @@ async fn attached(name: &str) -> Option<(Bridge, Vec<AddressBook>, Fake, Socket)
     .await;
     hello.expect("the fake bridge should say hello");
 
-    let books = contacts::books(bridge.clone()).await.expect("books");
+    let books = people::books(bridge.clone()).await.expect("books");
     Some((bridge, books, fake, socket))
 }
 
@@ -79,14 +80,14 @@ async fn lists_books_and_every_contact_in_them() {
     assert!(book("work").remote, "the remote book is marked remote");
     assert!(book("collected").read_only, "collected addresses are read-only");
 
-    let all = contacts::list(bridge.clone(), None, books.clone()).await.expect("list");
+    let all = people::list(bridge.clone(), None, books.clone()).await.expect("list");
     assert_eq!(all.len(), 7);
     // Sorted by family name, so the list reads like a rolodex rather than like insertion order.
     let names: Vec<String> = all.iter().map(|contact| contact.card.display_name()).collect();
     assert_eq!(names[0], "Bob Builder");
     assert_eq!(names[1], "Alice Chen");
 
-    let one_book = contacts::list(bridge, Some("work".to_string()), books).await.expect("list");
+    let one_book = people::list(bridge, Some("work".to_string()), books).await.expect("list");
     assert_eq!(one_book.len(), 2);
     assert!(one_book.iter().all(|contact| contact.book.as_deref() == Some("work")));
 }
@@ -95,7 +96,7 @@ async fn lists_books_and_every_contact_in_them() {
 async fn parses_the_vcards_it_gets_back() {
     let Some((bridge, books, _fake, _socket)) = attached("parse").await else { return };
 
-    let all = contacts::list(bridge, None, books).await.expect("list");
+    let all = people::list(bridge, None, books).await.expect("list");
     let alice = all.iter().find(|contact| contact.card.display_name() == "Alice Chen").expect("alice");
     let card = &alice.card;
     assert_eq!(card.name.family, "Chen");
@@ -112,12 +113,12 @@ async fn parses_the_vcards_it_gets_back() {
 async fn search_goes_through_thunderbird_rather_than_filtering_locally() {
     let Some((bridge, _books, _fake, _socket)) = attached("search").await else { return };
 
-    let hits = contacts::search(bridge.clone(), "okoro".to_string(), None).await.expect("search");
+    let hits = people::search(bridge.clone(), "okoro".to_string(), None).await.expect("search");
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].card.display_name(), "Dana Okoro");
 
     // Scoped to one book, a match in another book must not come back.
-    let scoped = contacts::search(bridge, "okoro".to_string(), Some("work".to_string())).await.expect("search");
+    let scoped = people::search(bridge, "okoro".to_string(), Some("work".to_string())).await.expect("search");
     assert!(scoped.is_empty());
 }
 
@@ -132,8 +133,8 @@ async fn creates_updates_and_deletes() {
     card.phones.clear();
     card.organisation = "Noctalia".to_string();
 
-    let id = contacts::create(bridge.clone(), "personal".to_string(), card.to_vcard()).await.expect("create");
-    let all = contacts::list(bridge.clone(), None, books.clone()).await.expect("list");
+    let id = people::create(bridge.clone(), "personal".to_string(), card.to_vcard()).await.expect("create");
+    let all = people::list(bridge.clone(), None, books.clone()).await.expect("list");
     assert_eq!(all.len(), 8);
     let made = all.iter().find(|contact| contact.id == id).expect("the new contact");
     // FN is derived from the name components, since the editor never asks for it directly.
@@ -144,15 +145,15 @@ async fn creates_updates_and_deletes() {
     let mut edited = made.card.clone();
     edited.role = "Maintainer".to_string();
     edited.emails[0].value = "nadia@noctalia.dev".to_string();
-    contacts::update(bridge.clone(), id.clone(), edited.to_vcard()).await.expect("update");
+    people::update(bridge.clone(), id.clone(), edited.to_vcard()).await.expect("update");
 
-    let all = contacts::list(bridge.clone(), None, books.clone()).await.expect("list");
+    let all = people::list(bridge.clone(), None, books.clone()).await.expect("list");
     let changed = all.iter().find(|contact| contact.id == id).expect("still there");
     assert_eq!(changed.card.role, "Maintainer");
     assert_eq!(changed.card.emails[0].value, "nadia@noctalia.dev");
 
-    contacts::delete(bridge.clone(), id.clone()).await.expect("delete");
-    let all = contacts::list(bridge, None, books).await.expect("list");
+    people::delete(bridge.clone(), id.clone()).await.expect("delete");
+    let all = people::list(bridge, None, books).await.expect("list");
     assert_eq!(all.len(), 7);
     assert!(all.iter().all(|contact| contact.id != id));
 }
@@ -161,14 +162,14 @@ async fn creates_updates_and_deletes() {
 async fn an_edit_keeps_the_properties_thunderbird_owns() {
     let Some((bridge, books, _fake, _socket)) = attached("preserve").await else { return };
 
-    let all = contacts::list(bridge.clone(), None, books.clone()).await.expect("list");
+    let all = people::list(bridge.clone(), None, books.clone()).await.expect("list");
     let alice = all.iter().find(|contact| contact.card.display_name() == "Alice Chen").expect("alice");
 
     let mut edited = alice.card.clone();
     edited.note = "Edited by noctmalia".to_string();
-    contacts::update(bridge.clone(), alice.id.clone(), edited.to_vcard()).await.expect("update");
+    people::update(bridge.clone(), alice.id.clone(), edited.to_vcard()).await.expect("update");
 
-    let all = contacts::list(bridge, None, books).await.expect("list");
+    let all = people::list(bridge, None, books).await.expect("list");
     let saved = all.iter().find(|contact| contact.id == alice.id).expect("alice");
     assert_eq!(saved.card.note, "Edited by noctmalia");
     // UID and the X- properties are Thunderbird's; losing them on save would orphan the contact.
