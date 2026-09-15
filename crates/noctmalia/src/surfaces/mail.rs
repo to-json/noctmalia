@@ -30,7 +30,8 @@ use iced::advanced::widget::Id;
 use iced::keyboard::{Key, Modifiers};
 use iced::widget::scrollable::{AbsoluteOffset, Viewport};
 use iced::widget::{
-    column, container, markdown, mouse_area, operation, row, scrollable, space, stack, text, text_editor, text_input,
+    column, container, markdown, mouse_area, operation, rich_text, row, scrollable, space, stack, text, text_editor,
+    text_input,
 };
 use iced::{Alignment, Color, Element, Length, Padding, Task};
 use noctalia_iced::keymap::{self, Keymap};
@@ -1733,6 +1734,18 @@ struct Reader;
 impl<'a> markdown::Viewer<'a, Message> for Reader {
     fn on_link_click(url: markdown::Uri) -> Message {
         Message::OpenLink(url)
+    }
+
+    /// A link that is only a different colour from the words around it reads as an accident, not
+    /// an invitation — the default renderer sets `link_color` and nothing else. This is the same
+    /// paragraph iced's own `markdown::paragraph` builds, with an underline added to link spans.
+    fn paragraph(&self, settings: markdown::Settings, content: &markdown::Text) -> Element<'a, Message> {
+        let spans = content
+            .spans(settings.style)
+            .iter()
+            .map(|span| text::Span { underline: span.link.is_some(), ..span.clone() })
+            .collect::<Vec<_>>();
+        rich_text(spans).size(settings.text_size).on_link_click(Self::on_link_click).into()
     }
 
     fn image(
