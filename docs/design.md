@@ -35,6 +35,20 @@
 > profile. Real Gmail mail also surfaced and led to fixing a genuine mail-surface bug along the
 > way: `message/rfc822` parts (forwards, bounces) weren't recognized as containers — see
 > `crates/noctmalia/src/mime/mod.rs`.
+>
+> **2026-09-15: real HTML rendering ("original formatting") landed** — see
+> `docs/html-mail-plan.md`. Mail's default renderer is still the Markdown downconversion this
+> document originally settled on (§1 above); a new opt-in per-letter mode, toggled with `o` or the
+> eye icon (`Showing::Original`), lays the letter out with actual CSS via `litehtml` instead. New
+> crate `crates/litehtml-sys` is the FFI boundary — a C++ shim implementing litehtml's
+> `document_container` and one flat `extern "C"` render call, linked against nixpkgs' own
+> prebuilt `litehtml`+`gumbo` (no vendoring, no cmake source build) — and `surfaces/html_view.rs`
+> paints its output onto an iced `canvas`, with line-wrapping driven by iced's own text shaper
+> (`iced_graphics::text::Paragraph`) rather than a guess, so it wraps against the same font that
+> actually paints it. litehtml still never touches the network — remote images stay unloaded in
+> both render modes, same as before — so this changes rendering fidelity only, not the "we load
+> nothing by default" property. Selective network access (the fetch chokepoint / trust-grant UI
+> the plan also describes) is not built yet.
 
 Status: the transport, contacts, **mail** and **calendar** exist and are tested against a real
 headless Thunderbird (`tools/smoke.sh`) or, for calendar's UI-level bridge calls, against
