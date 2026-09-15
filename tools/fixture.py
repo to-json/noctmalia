@@ -351,6 +351,81 @@ def flood(count, folder="inbox"):
     return made
 
 
+# ── Calendar ────────────────────────────────────────────────────────────────────────────────────
+#
+# Two calendars and five events: a daily repeater with a reminder, a plain meeting, a one-off with
+# a reminder, an all-day trip spanning several days, and a weekly repeater in the past — enough to
+# put something on screen in month, week, day and agenda alike. Dates are relative to now, the same
+# way the mail corpus's are, so the fixture always looks like "this week" whenever it is run.
+#
+# `fake-bridge.py` serves this from memory; nothing here is written into a real Thunderbird profile
+# yet (`tools/seed.py` seeds mail and contacts only) — the calendar Experiment's own CRUD is what
+# `tools/smoke.sh`'s "calendar round trip" exercises against the real thing.
+
+CALENDARS = [
+    {"id": "personal", "name": "Personal", "color": "#7c6df2"},
+    {"id": "work", "name": "Work", "color": "#2f9e6e"},
+]
+
+
+def _cal_stamp(days_offset, hour=9, minute=0):
+    """A compact UTC instant, `days_offset` days from now — `DTSTART`/`DTEND`'s own format."""
+    import datetime
+    moment = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=days_offset)
+    return moment.replace(hour=hour, minute=minute, second=0, microsecond=0).strftime("%Y%m%dT%H%M%SZ")
+
+
+def _cal_date(days_offset):
+    """A bare date, `days_offset` days from now — an all-day `DTSTART`/`DTEND`'s own format."""
+    import datetime
+    day = datetime.datetime.now(datetime.timezone.utc).date() + datetime.timedelta(days=days_offset)
+    return day.strftime("%Y%m%d")
+
+
+def ical(uid, summary, start, end=None, all_day=False, location="", description="", rrule=None, alarm_minutes=None):
+    """One `VEVENT` wrapped in its `VCALENDAR` — the shape `calendar.items.create` takes and
+    `calendar.items.query` hands back; see `crate::ical`."""
+    lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//noctmalia//fixture//EN",
+              "BEGIN:VEVENT", f"UID:{uid}", "DTSTAMP:20260901T000000Z", f"SUMMARY:{summary}"]
+    if all_day:
+        lines.append(f"DTSTART;VALUE=DATE:{start}")
+        lines.append(f"DTEND;VALUE=DATE:{end}")
+    else:
+        lines.append(f"DTSTART:{start}")
+        lines.append(f"DTEND:{end}")
+    if location:
+        lines.append(f"LOCATION:{location}")
+    if description:
+        lines.append(f"DESCRIPTION:{description}")
+    if rrule:
+        lines.append(f"RRULE:{rrule}")
+    if alarm_minutes is not None:
+        lines += ["BEGIN:VALARM", "ACTION:DISPLAY", f"DESCRIPTION:{summary}", f"TRIGGER:-PT{alarm_minutes}M", "END:VALARM"]
+    lines += ["END:VEVENT", "END:VCALENDAR"]
+    return "\r\n".join(lines) + "\r\n"
+
+
+def events():
+    """The calendar corpus. A function rather than a constant, like `messages()`, so it is always
+    relative to now."""
+    return [
+        {"calendar": "work", "id": "standup", "item": ical(
+            "standup-1@noctmalia.test", "Standup", _cal_stamp(0, 9, 0), _cal_stamp(0, 9, 15),
+            rrule="FREQ=DAILY", alarm_minutes=10)},
+        {"calendar": "work", "id": "review", "item": ical(
+            "review-1@noctmalia.test", "Budget review", _cal_stamp(1, 14, 0), _cal_stamp(1, 15, 0),
+            location="Room 4", description="Bring the numbers")},
+        {"calendar": "personal", "id": "dentist", "item": ical(
+            "dentist-1@noctmalia.test", "Dentist", _cal_stamp(3, 10, 30), _cal_stamp(3, 11, 0),
+            alarm_minutes=60)},
+        {"calendar": "personal", "id": "trip", "item": ical(
+            "trip-1@noctmalia.test", "Long weekend", _cal_date(5), _cal_date(8), all_day=True)},
+        {"calendar": "work", "id": "allhands", "item": ical(
+            "allhands-1@noctmalia.test", "All hands", _cal_stamp(-2, 16, 0), _cal_stamp(-2, 17, 0),
+            rrule="FREQ=WEEKLY")},
+    ]
+
+
 def eml(message):
     """One message as RFC 822, for `messages.import`."""
     from email.message import EmailMessage

@@ -9,9 +9,13 @@
 //! NOCTMALIA_SHOTS=/tmp/look cargo test -p noctmalia --test shots -- --ignored
 //! ```
 
+use chrono::{Local, NaiveTime};
 use iced::{Element, Settings, Size, Theme};
+use noctmalia::calendar::{Cal, Item};
+use noctmalia::ical::{self, Event, When};
 use noctmalia::mail::{self, Reply};
 use noctmalia::shell::Shell;
+use noctmalia::surfaces::calendar::{Calendar, Message as CalMessage};
 use noctmalia::surfaces::mail::{Mail, Message, Showing};
 use noctmalia::{font, mime, palette};
 use noctmalia_bridge::Bridge;
@@ -256,6 +260,49 @@ fn ready(which: u32) -> (Mail, Shell) {
     (mail, shell)
 }
 
+/// A calendar with two calendars and a handful of events, all placed relative to today the same
+/// way the mail fixture places its messages relative to now.
+fn cal_ready(which: u32) -> (Calendar, Shell) {
+    let mut shell = Shell::new(bridge(which), WINDOW.width);
+    shell.set_connected(true);
+    let mut calendar = Calendar::new();
+    let now = Instant::now();
+
+    let cals = vec![
+        Cal { id: "personal".to_string(), name: "Personal".to_string(), color: None, hidden: false, read_only: false },
+        Cal { id: "work".to_string(), name: "Work".to_string(), color: None, hidden: false, read_only: false },
+    ];
+    let _ = calendar.update(CalMessage::Cals(Ok(cals)), &mut shell, now);
+
+    let today = Local::now().date_naive();
+    let at = |day_offset: i64, hour: u32, minute: u32| {
+        ical::local_from_naive(
+            (today + chrono::Duration::days(day_offset)).and_time(NaiveTime::from_hms_opt(hour, minute, 0).unwrap()),
+        )
+    };
+    let timed = |calendar_id: &str, id: &str, title: &str, start, end, rrule: Option<&str>, alarm: Option<i64>| {
+        let mut event = Event::blank(When::Time(start), When::Time(end));
+        event.summary = title.to_string();
+        event.rrule = rrule.map(str::to_string);
+        if let Some(minutes) = alarm {
+            event.alarms.push(chrono::Duration::minutes(minutes));
+        }
+        Item { id: id.to_string(), calendar_id: calendar_id.to_string(), instance: None, event }
+    };
+    let mut items = vec![
+        timed("work", "standup", "Standup", at(0, 9, 0), at(0, 9, 15), Some("FREQ=DAILY"), Some(10)),
+        timed("work", "review", "Budget review", at(0, 14, 0), at(0, 15, 0), None, None),
+        timed("work", "overlap", "1:1 with Priya", at(0, 14, 30), at(0, 15, 0), None, None),
+        timed("personal", "dentist", "Dentist", at(3, 10, 30), at(3, 11, 0), None, Some(60)),
+    ];
+    let mut trip =
+        Event::blank(When::Date(today + chrono::Duration::days(5)), When::Date(today + chrono::Duration::days(8)));
+    trip.summary = "Long weekend".to_string();
+    items.push(Item { id: "trip".to_string(), calendar_id: "personal".to_string(), instance: None, event: trip });
+    let _ = calendar.update(CalMessage::Items(1, Ok(items)), &mut shell, now);
+    (calendar, shell)
+}
+
 /// The dates are relative, so a shot taken tomorrow differs from one taken today; these are for
 /// looking at rather than for diffing.
 #[test]
@@ -310,4 +357,23 @@ fn every_surface_has_its_picture_taken() {
 
     let (mail, shell) = ready(5);
     shot("mail-index", mail.view(&shell, then).map(|_| ()));
+
+    let (calendar, shell) = cal_ready(6);
+    shot("calendar-month", calendar.view(&shell, then).map(|_| ()));
+
+    let (mut calendar, mut shell) = cal_ready(7);
+    let _ = calendar.update(CalMessage::View(noctmalia::surfaces::calendar::ViewKind::Week), &mut shell, now);
+    shot("calendar-week", calendar.view(&shell, then).map(|_| ()));
+
+    let (mut calendar, mut shell) = cal_ready(8);
+    let _ = calendar.update(CalMessage::View(noctmalia::surfaces::calendar::ViewKind::Day), &mut shell, now);
+    shot("calendar-day", calendar.view(&shell, then).map(|_| ()));
+
+    let (mut calendar, mut shell) = cal_ready(10);
+    let _ = calendar.update(CalMessage::View(noctmalia::surfaces::calendar::ViewKind::Agenda), &mut shell, now);
+    shot("calendar-agenda", calendar.view(&shell, then).map(|_| ()));
+
+    let (mut calendar, mut shell) = cal_ready(11);
+    let _ = calendar.update(CalMessage::Open("standup".to_string()), &mut shell, now);
+    shot("calendar-editor", calendar.view(&shell, then).map(|_| ()));
 }

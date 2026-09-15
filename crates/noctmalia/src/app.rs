@@ -20,7 +20,7 @@
 
 use crate::palette;
 use crate::shell::Shell;
-use crate::surfaces::{Pressed, Surface, contacts, mail};
+use crate::surfaces::{Pressed, Surface, calendar, contacts, mail};
 use crate::ui;
 use iced::keyboard::{self, Key, Modifiers, key::Named};
 use iced::widget::operation;
@@ -57,6 +57,7 @@ pub enum Message {
     Palette(Palette),
     Contacts(contacts::Message),
     Mail(mail::Message),
+    Calendar(calendar::Message),
 }
 
 pub struct App {
@@ -65,6 +66,7 @@ pub struct App {
     surface: Surface,
     contacts: contacts::Contacts,
     mail: mail::Mail,
+    calendar: calendar::Calendar,
     frames: Option<Frames>,
     /// Only the accent has to be held: the other roles are read straight out of the theme, but iced
     /// keeps `primary` in its own palette, so the `Theme` has to be rebuilt when it changes.
@@ -121,6 +123,7 @@ impl App {
             surface: Surface::Mail,
             contacts: contacts::Contacts::new(),
             mail: mail::Mail::new(),
+            calendar: calendar::Calendar::new(),
             frames: Frames::enabled(),
             accent: theme::palette().primary,
         }
@@ -145,7 +148,10 @@ impl App {
         // iced re-reads the subscriptions after every message, so starting an animation in
         // `update` turns this on for exactly as long as it runs.
         let now = Instant::now();
-        let animating = self.shell.animating(now) || self.contacts.animating(now) || self.mail.animating(now);
+        let animating = self.shell.animating(now)
+            || self.contacts.animating(now)
+            || self.mail.animating(now)
+            || self.calendar.animating(now);
         if animating || self.frames.as_ref().is_some_and(|frames| frames.drive) {
             subscriptions.push(iced::window::frames().map(|_| Message::Frame));
         }
@@ -182,6 +188,7 @@ impl App {
                 return Task::batch([
                     self.contacts.notify(&name, &self.shell).map(Message::Contacts),
                     self.mail.notify(&name, &data, &self.shell).map(Message::Mail),
+                    self.calendar.notify(&name, &self.shell).map(Message::Calendar),
                 ]);
             }
 
@@ -206,6 +213,9 @@ impl App {
             Message::Mail(message) => {
                 return self.mail.update(message, &mut self.shell, now).map(Message::Mail);
             }
+            Message::Calendar(message) => {
+                return self.calendar.update(message, &mut self.shell, now).map(Message::Calendar);
+            }
         }
         Task::none()
     }
@@ -215,6 +225,7 @@ impl App {
         Task::batch([
             self.mail.resync(&self.shell).map(Message::Mail),
             self.contacts.resync(&self.shell).map(Message::Contacts),
+            self.calendar.resync(&self.shell).map(Message::Calendar),
         ])
     }
 
@@ -229,6 +240,7 @@ impl App {
         match surface {
             Surface::Mail => self.mail.entered(now),
             Surface::Contacts => self.contacts.entered(now),
+            Surface::Calendar => self.calendar.entered(now),
         }
         Task::none()
     }
@@ -249,6 +261,7 @@ impl App {
         let pressed = match self.surface {
             Surface::Mail => wrap(self.mail.press(&key, modifiers), Message::Mail),
             Surface::Contacts => wrap(self.contacts.press(&key, modifiers), Message::Contacts),
+            Surface::Calendar => wrap(self.calendar.press(&key, modifiers), Message::Calendar),
         };
         match pressed {
             Pressed::Act(message) => Task::done(message),
@@ -273,6 +286,7 @@ impl App {
             let surface = match self.surface {
                 Surface::Mail => self.mail.view(&self.shell, now).map(Message::Mail),
                 Surface::Contacts => self.contacts.view(&self.shell, now).map(Message::Contacts),
+                Surface::Calendar => self.calendar.view(&self.shell, now).map(Message::Calendar),
             };
             column![container(surface).height(Length::Fill), self.shell.notice(now, Message::Dismiss)].into()
         } else {
@@ -293,6 +307,7 @@ impl App {
         let typed = match self.surface {
             Surface::Mail => self.mail.typed(),
             Surface::Contacts => self.contacts.typed(),
+            Surface::Calendar => self.calendar.typed(),
         };
         if !typed.is_empty() {
             bar = bar.push(

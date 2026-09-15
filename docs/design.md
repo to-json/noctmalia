@@ -13,9 +13,25 @@
 > (mail-plan §2, §3). And mail is not a directory of files, because Thunderbird keeps no bodies as
 > files to make a directory out of — `findings.md` "What the profile retains" is the measurement
 > that settled it.
+>
+> **2026-09-14: the Calendar section below is built**, against the calendar Experiment already
+> vendored in `tbd/bridge`. It shipped as a UI-and-glue pass, the same shape mail and contacts were:
+> `src/ical.rs` (a hand-rolled `VEVENT` parser/builder, modelled on `src/vcard.rs`'s approach to the
+> same RFC 5545/6350 grammar rather than a new crate), `src/calendar.rs` (bridge calls), and
+> `src/surfaces/calendar.rs` (the rail, month/week/day/agenda, and the event editor). Two answers
+> below turned out differently once there was code: a calendar's colour is *assigned* from the
+> sixteen palette roles rather than drawn from Thunderbird's own arbitrary hex (design language,
+> not a gap), and recurrence editing is five gcal-style presets rather than the "agenda strip in
+> the reader rail" sketched below — a full month/week/day view was what got asked for once mail and
+> contacts existed to compare it against. Cut from this pass, deliberately: invite RSVP (attendees
+> are shown read-only and round-tripped, never edited) and a Tasks view — see the plan this was
+> built from for the reasoning, same shape as mail-plan.md's own cuts.
 
-Status: the transport, contacts and **mail** exist and are tested against a real headless
-Thunderbird (`tools/smoke.sh`). Calendar is still design.
+Status: the transport, contacts, **mail** and **calendar** exist and are tested against a real
+headless Thunderbird (`tools/smoke.sh`) or, for calendar's UI-level bridge calls, against
+`tools/fake-bridge.py` (`tests/calendar.rs`) — recurrence expansion itself is only proven against
+the real Experiment, since the stand-in does not implement it (`tools/fake-bridge.py`'s own
+`Store.items_in_range` says so).
 
 ## Verified in a container (2026-09-13)
 
@@ -157,6 +173,12 @@ mail_.onEvent<ThreadChanged>([this](auto& e) { list_->patch(e.threadId, e.delta)
 - The plugin API is Luau `ui.*`. It talks to mailnd over its HTTP/stream API, which is a second listener on the same daemon.
 
 ## Calendar
+
+> Built as `src/surfaces/calendar.rs`, directly against the bridge — see the note at the top of
+> this document. The backend research below (the Experiment, its API surface, its gotchas) is
+> exactly what shipped and is still accurate; the **RPC additions** and **UI** sketches below are
+> not — there is no `mailnd` to add an RPC to (it was cut, see the note above the "Status" line),
+> and the UI is month/week/day/agenda plus an event editor, not an agenda strip.
 
 **No release ships a calendar extension API.**
 - Checked the `omni.ja` of TB 140.15esr, 153.2.0esr, 154.0, 155.0.1 and 156.0b3, plus `ext-mail.json` at comm-central tip.

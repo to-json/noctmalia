@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """A Thunderbird stand-in for developing the UI.
 
-Connects to noctmalia's socket the way tbd's nm-shim does, says hello, and serves the contacts and
-mail methods out of memory. It exists so the front end can be run and tested without Docker, a
-profile or a mail account; it is not a protocol conformance test. Everything it does not implement
-comes back as MethodNotFound, exactly as the real bridge would.
+Connects to noctmalia's socket the way tbd's nm-shim does, says hello, and serves the contacts,
+mail and calendar methods out of memory. It exists so the front end can be run and tested without
+Docker, a profile or a mail account; it is not a protocol conformance test. Everything it does not
+implement comes back as MethodNotFound, exactly as the real bridge would. Calendar recurrence is
+one such gap: `RRULE` is served verbatim rather than expanded, since expansion is Thunderbird's own
+calendar Experiment's job (see `Store.items_in_range`).
 
 The mail it serves is `fixture.messages()`, which is the same corpus `seed.py` writes into a real
 profile — so the same deliberately nasty mail is on screen either way. It pages `messages.list` in
@@ -19,6 +21,7 @@ import base64
 import itertools
 import json
 import os
+import re
 import socket
 import sys
 import time
@@ -125,6 +128,37 @@ def part_tree(message):
     return root
 
 
+def _bound(item, name):
+    """A `DTSTART`/`DTEND` value out of a `VEVENT`'s raw ICAL text, params and all skipped."""
+    match = re.search(rf"{name}(?:;[^:\r\n]*)?:([^\r\n]+)", item)
+    return match.group(1) if match else None
+
+
+def _overlaps(item_start, item_end, start, end):
+    """String-compares `[item_start, item_end)` against `[start, end)`. Our synthetic stamps are
+    either an 8-digit date or a `YYYYMMDDTHHMMSSZ` instant; truncating the longer of a pair to the
+    shorter's length before comparing lets a bare date and a full timestamp still sort correctly
+    against each other as plain strings, with no date parsing needed in the fixture."""
+
+    def before(a, b):
+        if a is None or b is None:
+            return False
+        shorter = min(len(a), len(b))
+        return a[:shorter] < b[:shorter]
+
+    def at_or_after(a, b):
+        if a is None or b is None:
+            return False
+        shorter = min(len(a), len(b))
+        return a[:shorter] >= b[:shorter]
+
+    if start and before(item_end, start):
+        return False
+    if end and at_or_after(item_start, end):
+        return False
+    return True
+
+
 class Store:
     def __init__(self, empty):
         self.books = [dict(book) for book in BOOKS]
@@ -135,10 +169,13 @@ class Store:
         self.filters = []
         self.messages = {}
         self.folders = {}
+        self.calendars = []
+        self.events = {}
         if not empty:
             for parent, card in fixture.CONTACTS:
                 self.add(parent, card)
             self.load_mail()
+            self.load_calendar()
 
     # ── Mail ────────────────────────────────────────────────────────────────
     def load_mail(self):
@@ -203,6 +240,29 @@ class Store:
                 found.append(contact)
         return found
 
+    # ── Calendar ───────────────────────────────────────────────────────────
+    def load_calendar(self):
+        for calendar in fixture.CALENDARS:
+            self.calendars.append({**calendar, "hidden": False, "readOnly": False})
+        for event in fixture.events():
+            self.events[event["id"]] = {"id": event["id"], "calendarId": event["calendar"], "item": event["item"]}
+
+    def items_in_range(self, calendar_ids, start, end):
+        """Items overlapping `[start, end)`. Not recurrence expansion — an `RRULE` is served
+        verbatim and matched only by its own `DTSTART`, since real recurrence maths belongs to
+        Thunderbird's calendar Experiment (`tools/smoke.sh`'s "calendar round trip" is what proves
+        that end), not to this stand-in.
+        """
+        found = []
+        for event in self.events.values():
+            if calendar_ids and event["calendarId"] not in calendar_ids:
+                continue
+            item_start = _bound(event["item"], "DTSTART")
+            item_end = _bound(event["item"], "DTEND") or item_start
+            if _overlaps(item_start, item_end, start, end):
+                found.append(event)
+        return found
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -231,7 +291,7 @@ def main():
     def emit(event, data=None):
         send({"event": event, "data": data or {}})
 
-    emit("bridge.hello", {"protocol": 1, "bridgeVersion": "fake", "calendar": False})
+    emit("bridge.hello", {"protocol": 1, "bridgeVersion": "fake", "calendar": True})
 
     for line in stream:
         try:
@@ -372,6 +432,38 @@ def handle(store, method, params, emit):
     if method == "contacts.delete":
         contact = store.contacts.pop(params["contactId"])
         emit("contacts.onDeleted", {"parentId": contact["parentId"], "contactId": contact["id"]})
+        return None
+
+    # ── Calendar ────────────────────────────────────────────────────────────
+    if method == "calendar.calendars.query":
+        return store.calendars
+    if method == "calendar.calendars.update":
+        for calendar in store.calendars:
+            if calendar["id"] == params["calendarId"]:
+                calendar.update(params["updateProperties"])
+                emit("calendar.calendars.onUpdated", {"calendar": calendar, "changed": params["updateProperties"]})
+        return None
+    if method == "calendar.items.query":
+        wanted = params.get("calendarId")
+        if isinstance(wanted, str):
+            wanted = [wanted]
+        found = store.items_in_range(wanted, params.get("rangeStart"), params.get("rangeEnd"))
+        return [{"id": event["id"], "calendarId": event["calendarId"], "item": event["item"]} for event in found]
+    if method == "calendar.items.create":
+        event_id = f"event{next(store.ids)}"
+        event = {"id": event_id, "calendarId": params["calendarId"], "item": params["item"]}
+        store.events[event_id] = event
+        emit("calendar.items.onCreated", {"item": event})
+        return event
+    if method == "calendar.items.update":
+        event = store.events[params["id"]]
+        event["item"] = params["item"]
+        emit("calendar.items.onUpdated", {"item": event, "changeInfo": {}})
+        return event
+    if method == "calendar.items.remove":
+        event = store.events.pop(params["id"], None)
+        if event:
+            emit("calendar.items.onRemoved", {"calendarId": event["calendarId"], "id": event["id"]})
         return None
     raise KeyError(method)
 
