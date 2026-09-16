@@ -155,6 +155,9 @@ const AUTH_METHODS = {
   none: Ci.nsMsgAuthMethod.none,
   cleartext: Ci.nsMsgAuthMethod.passwordCleartext,
   encrypted: Ci.nsMsgAuthMethod.passwordEncrypted,
+  // IMAP only (`provisionAccount` never sets it on the SMTP server): Gmail rejects cleartext SMTP
+  // too, so an OAuth2 account can sync but not send until SMTP-over-OAuth is built.
+  oauth2: Ci.nsMsgAuthMethod.OAuth2,
 };
 
 function pick(table, key, field) {
@@ -264,15 +267,26 @@ this.noctmalia = class extends ExtensionAPI {
             MailServices.accounts.createLocalMailAccount();
           }
 
+          const wantAuth = pick(AUTH_METHODS, imap.auth ?? "cleartext", "imap.auth");
           const found = MailServices.accounts.findServer(imap.username, imap.host, "imap");
           if (found) {
-            return { accountId: MailServices.accounts.findAccountForServer(found).key, created: false };
+            // findServer matches username+host only, not auth method. A server left over from an
+            // earlier run with a different auth method (e.g. a broken cleartext Gmail server from
+            // before OAuth2 support existed) would otherwise be reported as "done" while still
+            // broken — remove it and fall through to create it fresh with the auth method asked for.
+            if (found.authMethod === wantAuth) {
+              return { accountId: MailServices.accounts.findAccountForServer(found).key, created: false };
+            }
+            const stale = MailServices.accounts.findAccountForServer(found);
+            if (stale) {
+              MailServices.accounts.removeAccount(stale, true);
+            }
           }
 
           const server = MailServices.accounts.createIncomingServer(imap.username, imap.host, "imap");
           server.port = imap.port ?? 993;
           server.socketType = pick(SOCKET_TYPES, imap.socketType ?? "tls", "imap.socketType");
-          server.authMethod = pick(AUTH_METHODS, imap.auth ?? "cleartext", "imap.auth");
+          server.authMethod = wantAuth;
           server.prettyName = config.name ?? email;
           server.doBiff = true;
           server.biffMinutes = config.biffMinutes ?? 1;
@@ -303,6 +317,23 @@ this.noctmalia = class extends ExtensionAPI {
 
           Services.prefs.savePrefFile(null);
           return { accountId: account.key, created: true };
+        },
+
+        // Google will not hand a token to a program with no window to render its consent screen
+        // in, so headless can never finish OAuth — this puts Thunderbird's own account-setup
+        // dialog in front of whatever window is on screen, which only exists once the caller has
+        // switched Thunderbird into windowed mode (`crate::thunderbird::Supervisor::open_account_wizard`).
+        async openAccountWizard() {
+          const win = Services.wm.getMostRecentWindow("mail:3pane");
+          if (!win) {
+            throw new ExtensionError("no mail window is open — the account wizard needs a windowed Thunderbird");
+          }
+          if (typeof win.openAccountHub !== "function") {
+            throw new ExtensionError("this Thunderbird build has no openAccountHub to drive");
+          }
+          win.focus();
+          await win.openAccountHub("MAIL");
+          return true;
         },
 
         // Which conversation Thunderbird has put each of these messages in.

@@ -357,6 +357,15 @@ impl App {
                 self.shell.fail(format!("control: {name:?} is no longer available"), now);
             }
 
+            // Only the application holds the `Supervisor` that can put a window up at all; the
+            // mail surface never sees this one.
+            Message::Mail(mail::Message::OpenThunderbirdSettings) => match &self.backend {
+                Backend::Managed(supervisor) => supervisor.open_account_wizard(),
+                Backend::External => self.shell.fail(
+                    "opening Thunderbird settings needs noctmalia's own Thunderbird, not an external one".to_string(),
+                    now,
+                ),
+            },
             Message::Mail(message) => {
                 let delivered = self.mail.deliver(message, &mut self.shell, now);
                 return self.deliver(delivered);

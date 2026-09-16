@@ -438,8 +438,10 @@ it asks for a clean exit and waits. `crates/noctmalia/src/thunderbird/`. What St
   points `services.settings.server` at the documented dummy, since the first native run showed
   Thunderbird polling remote settings on boot.
 - ✅ **A windowed launch on the same profile attaches too** (`MOZ_ENABLE_WAYLAND=1`, no `--headless`).
-  This is the primitive `docs/oauth-plan.md` Stream 2.4 will build the account window on. Nothing
-  drives the wizard yet.
+  `docs/oauth-plan.md` Stream 2.4 built the account window on this primitive (`Launch::windowed`,
+  `Supervisor::open_account_wizard`), driving it with Thunderbird's own `openAccountHub("MAIL")`
+  found in the shipped build's `omni.ja`. Not yet run end-to-end against a real Google consent
+  screen — see that plan's Stream 4.
 - ✅ **`PR_SET_PDEATHSIG` is per spawning thread.** The supervisor spawns from its own long-lived thread,
   never from a tokio worker.
 - ⚠️ **Two Thunderbirds on one socket thrash.** Found live: the old container was still up while the

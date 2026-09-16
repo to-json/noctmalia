@@ -131,6 +131,18 @@ impl Status {
 
 enum Order {
     Stop(mpsc::Sender<()>),
+    /// Swap the headless Thunderbird for a windowed one on the same profile and open its native
+    /// account-setup dialog, for OAuth consent. Returns to headless on its own once that window
+    /// closes. A no-op if a windowed session is already open.
+    OpenAccountWizard,
+}
+
+/// Which Thunderbird is currently being run: the steady-state headless one, or the windowed one
+/// an account-wizard request put up temporarily.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Headless,
+    Windowed,
 }
 
 /// The thread that owns Thunderbird for the life of the window. Cheap to clone; every clone
@@ -166,6 +178,25 @@ impl Launch {
             paths.profile.display().to_string(),
             "--no-remote".to_string(),
         ];
+        Launch { program: paths.binary(), args, env }
+    }
+
+    /// Windowed, on the same profile — the only way OAuth consent can ever complete: Google will
+    /// not hand a token to a program with no window for its own account-setup dialog to render
+    /// in. `docs/findings.md` §11 confirmed this attaches on the same profile as headless, given
+    /// `MOZ_ENABLE_WAYLAND=1` and the display the compositor is already listening on.
+    pub fn windowed(paths: &Paths) -> Launch {
+        let mut env = allowlisted_environment();
+        env.push(("NOCTMALIA_BRIDGE_SOCKET".into(), paths.socket.display().to_string()));
+        env.push(("MOZ_CRASHREPORTER_DISABLE".into(), "1".into()));
+        env.push(("NO_AT_BRIDGE".into(), "1".into()));
+        env.push(("MOZ_ENABLE_WAYLAND".into(), "1".into()));
+        for name in ["WAYLAND_DISPLAY", "DISPLAY"] {
+            if let Ok(value) = std::env::var(name) {
+                env.push((name.to_string(), value));
+            }
+        }
+        let args = vec!["--profile".to_string(), paths.profile.display().to_string(), "--no-remote".to_string()];
         Launch { program: paths.binary(), args, env }
     }
 }
@@ -213,6 +244,13 @@ impl Supervisor {
             let _ = gone.recv_timeout(QUIT_GRACE + STOP_GRACE + Duration::from_secs(2));
         }
     }
+
+    /// Puts Thunderbird's own account-setup window in front of the user, for OAuth consent
+    /// headless can never complete. Fire-and-forget: the window shows up on its own timeline, and
+    /// `Status`/`bridge.quit`'s usual hello/lost events say when it has attached or gone away.
+    pub fn open_account_wizard(&self) {
+        let _ = self.orders.send(Order::OpenAccountWizard);
+    }
 }
 
 /// One running Thunderbird, however it was started.
@@ -255,6 +293,7 @@ fn run(
     stop_stale_scope();
 
     let mut restarts = 0u32;
+    let mut mode = Mode::Headless;
     loop {
         if let Err(error) = provision::everything(&paths, dev) {
             failed(format!("provisioning the profile: {error}"));
@@ -262,7 +301,11 @@ fn run(
             return;
         }
         report(if restarts == 0 { Report::Starting } else { Report::Restarting });
-        let mut running = match start(Launch::headless(&paths), &paths.log) {
+        let launch = match mode {
+            Mode::Headless => Launch::headless(&paths),
+            Mode::Windowed => Launch::windowed(&paths),
+        };
+        let mut running = match start(launch, &paths.log) {
             Ok(running) => running,
             Err(error) => {
                 failed(format!("starting {}: {error}", paths.binary().display()));
@@ -270,12 +313,15 @@ fn run(
                 return;
             }
         };
+        if mode == Mode::Windowed {
+            spawn_wizard_trigger(bridge.clone());
+        }
         if let Ok(mut status) = status.lock() {
             status.pid = Some(running.child.id());
             status.scoped = running.scoped;
             status.started = Some(running.since);
             status.restarts = restarts;
-            status.state = "running".into();
+            status.state = if mode == Mode::Windowed { "windowed".into() } else { "running".into() };
         }
 
         // Watch the child and the inbox at once: a waiter thread turns the exit into a message.
@@ -289,6 +335,7 @@ fn run(
         enum Next {
             Exited(Option<i32>),
             Stop(mpsc::Sender<()>),
+            OpenWizard,
         }
         let next = loop {
             if let Ok(status) = exited.try_recv() {
@@ -296,6 +343,7 @@ fn run(
             }
             match inbox.recv_timeout(Duration::from_millis(200)) {
                 Ok(Order::Stop(done)) => break Next::Stop(done),
+                Ok(Order::OpenAccountWizard) => break Next::OpenWizard,
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
                 // Nobody holds the supervisor any more: the window is gone without saying so.
                 Err(mpsc::RecvTimeoutError::Disconnected) => break Next::Stop(mpsc::channel().0),
@@ -311,11 +359,30 @@ fn run(
                 let _ = done.send(());
                 return;
             }
+            Next::OpenWizard => {
+                if mode == Mode::Windowed {
+                    // Already up; a second request is a no-op rather than a re-launch.
+                    continue;
+                }
+                eprintln!("noctmalia: opening the account-setup window");
+                stop(&bridge, &mut running, &exited);
+                mode = Mode::Windowed;
+                restarts = 0;
+            }
             Next::Exited(code) => {
                 let _ = running.child.wait();
                 let _ = (pid, scoped);
                 let uptime = running.since.elapsed();
                 eprintln!("noctmalia: thunderbird exited ({code:?}) after {:.0}s", uptime.as_secs_f32());
+                if mode == Mode::Windowed {
+                    // The account-setup window closing (consent finished, or the user gave up) is
+                    // an ordinary exit, not a crash — go back to steady state without counting it
+                    // against the crash-restart guard below.
+                    eprintln!("noctmalia: the account-setup window closed; returning to headless");
+                    mode = Mode::Headless;
+                    restarts = 0;
+                    continue;
+                }
                 if uptime < RESTART_WINDOW && restarts > 0 {
                     failed(format!("Thunderbird exited twice within a minute (last status {code:?})"));
                     wait_for_stop(&inbox);
@@ -325,6 +392,35 @@ fn run(
             }
         }
     }
+}
+
+/// Waits for the windowed Thunderbird just started to attach, then asks it to open its own
+/// account-setup dialog. Runs off the supervisor thread so a slow or absent attach never blocks
+/// watching the child or answering a `Stop`.
+fn spawn_wizard_trigger(bridge: Bridge) {
+    std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while bridge.stats().connection.is_none() {
+            if Instant::now() >= deadline {
+                eprintln!("noctmalia: windowed Thunderbird never attached; not opening the account wizard");
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        let opened = tokio::runtime::Builder::new_current_thread().enable_all().build().is_ok_and(|runtime| {
+            runtime
+                .block_on(async {
+                    tokio::time::timeout(Duration::from_secs(5), bridge.call_raw("accounts.openWizard", json!({})))
+                        .await
+                })
+                .is_ok_and(|result| result.is_ok())
+        });
+        if opened {
+            eprintln!("noctmalia: opened the account-setup window");
+        } else {
+            eprintln!("noctmalia: could not open the account-setup window");
+        }
+    });
 }
 
 /// Once there is nothing to supervise, the only thing left to do is answer a stop.
@@ -513,6 +609,44 @@ mod tests {
         let which = NEXT.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!("noctmalia-tb-test-{}-{which}.sock", std::process::id()));
         Bridge::spawn(path).expect("a socket")
+    }
+
+    fn paths(name: &str) -> Paths {
+        let root = std::env::temp_dir().join(format!("noctmalia-thunderbird-{name}-{}", std::process::id()));
+        Paths {
+            install: root.join("install"),
+            profile: root.join("profile"),
+            shim: root.join("data/nm-shim.py"),
+            manifest: root.join("mozilla/native-messaging-hosts/noctmalia.bridge.json"),
+            cache: root.join("cache"),
+            log: root.join("state/thunderbird.log"),
+            socket: root.join("run/bridge.sock"),
+        }
+    }
+
+    #[test]
+    fn windowed_drops_headless_and_carries_the_display() {
+        // SAFETY: this test does not run alongside others that read these two variables.
+        unsafe {
+            std::env::set_var("WAYLAND_DISPLAY", "wayland-9");
+            std::env::remove_var("DISPLAY");
+        }
+        let launch = Launch::windowed(&paths("windowed"));
+        assert!(!launch.args.contains(&"--headless".to_string()));
+        assert!(launch.args.contains(&"--no-remote".to_string()));
+        assert!(launch.env.iter().any(|(k, v)| k == "MOZ_ENABLE_WAYLAND" && v == "1"));
+        assert!(launch.env.iter().any(|(k, v)| k == "WAYLAND_DISPLAY" && v == "wayland-9"));
+        // SAFETY: same test, cleaning up after itself.
+        unsafe {
+            std::env::remove_var("WAYLAND_DISPLAY");
+        }
+    }
+
+    #[test]
+    fn headless_has_no_display_and_no_wayland_flag() {
+        let launch = Launch::headless(&paths("headless"));
+        assert!(launch.args.contains(&"--headless".to_string()));
+        assert!(!launch.env.iter().any(|(k, _)| k == "MOZ_ENABLE_WAYLAND"));
     }
 
     fn systemd_here() -> bool {

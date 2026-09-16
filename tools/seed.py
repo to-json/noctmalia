@@ -135,7 +135,8 @@ def seed_test_account():
         # app password); that shows up here as a normal BridgeError, not a crash.
         result = call("dev.provisionAccount", config, timeout=120)
     except BridgeError as error:
-        print(f"account {name!r}: could not provision it — {error}", file=sys.stderr)
+        hint = " — run tools/oauth_bootstrap.sh once to sign in with OAuth2" if domain == "gmail.com" else ""
+        print(f"account {name!r}: could not provision it{hint} — {error}", file=sys.stderr)
         return
     print(f"account {name!r}: created {result.get('accountId')}")
 

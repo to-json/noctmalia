@@ -3,6 +3,55 @@
 Date: 2026-09-15
 Depends on: None
 
+> **Streams 2 and 3 built, 2026-09-16**, after `docs/one-program-plan.md` replaced the Docker
+> dev workflow this plan was written against — noctmalia now spawns its own native Thunderbird
+> (`crates/noctmalia/src/thunderbird/`), so every reference below to `compose.gui.yaml`,
+> `tbd/bridge/...` or `TBD_MODE=gui` is superseded by what actually shipped:
+>
+> - **Stream 1.5 (the trigger) is answered.** The real, shipped Thunderbird 155.0.1's own
+>   `openAccountHub("MAIL")` — a global on the `mail:3pane` window, found by extracting the
+>   fetched build's `omni.ja` rather than guessing — is what `noctmalia.openAccountWizard`
+>   (`bridge/experiments/noctmalia/parent.js`) calls. No pre-fill of the email address is
+>   possible at that layer; the dialog asks for it itself, which is an acceptable loss.
+> - **The windowed launch primitive** `docs/findings.md` §11 flagged as unbuilt is now
+>   `Launch::windowed` (`crates/noctmalia/src/thunderbird/mod.rs`): `MOZ_ENABLE_WAYLAND=1`, no
+>   `--headless`, same profile. `Supervisor::open_account_wizard()` swaps the running headless
+>   Thunderbird for a windowed one, waits for it to attach, calls `openAccountWizard`, and — this
+>   is the one thing that changed the supervisor's own state machine — returns to headless on its
+>   own once that window closes, without that exit counting against the crash-restart guard.
+> - **The in-app trigger** is a single exposed command-palette entry, "Open Thunderbird settings"
+>   (`crates/noctmalia/src/surfaces/mail.rs`), exactly as the plan's own framing intended: no
+>   general account-management UI was built, because the plan never called for one — "one action
+>   in our UI kicks it off" was always meant literally. Named for what it actually opens rather
+>   than "Connect a Gmail account": `openAccountHub("MAIL")` lands on account setup, but nothing
+>   stops the dialog being minimized or closed to the full native Thunderbird underneath — its
+>   whole menu, prefs and other accounts, not a scoped dialog. Labelling it as settings makes that
+>   true on its face instead of surprising; it costs nothing since account setup was already
+>   happening inside the same window either way.
+> - **Stream 2.1/2.3's IMAP-only, no-SMTP-OAuth scope applies to `dev.provisionAccount` only** —
+>   the scripted path `tools/seed.py` uses for the throwaway test account. "Open Thunderbird
+>   settings" never calls it: past the trigger, it hands off entirely to Thunderbird's own account
+>   wizard, which sets up SMTP with OAuth2 the same way real desktop Thunderbird always has. A real
+>   account added this way should read and send; a script-provisioned one still can't send. Not
+>   yet confirmed end to end (Stream 4).
+> - **Stream 3 shrank to almost nothing.** The one-program architecture's profile is a stable,
+>   persistent directory that ordinary restarts never touch — only an explicit `just reset` wipes
+>   it, unlike `docker compose down -v`, which this plan's Stream 3.1 (a cached-credential file
+>   with a guessed expiry) was built to survive. There is no longer anything to survive by
+>   default, so that file was never built: `tools/oauth_bootstrap.sh` just triggers the palette
+>   command over the control socket (`tools/noctmalia-ctl.py run "Open Thunderbird settings"`) and
+>   talks the person through the rest. Stream 2.5 (token injection into a fresh profile) is
+>   likewise dropped — replaying a captured token was only ever worth building to survive a wipe
+>   that no longer happens routinely; after `just reset`, re-running `oauth_bootstrap.sh` is the
+>   answer, not injection.
+> - **Stream 1.4 (does a captured token replay into a fresh profile) stays open, on purpose** —
+>   moot for now given the above, revisit only if a real need for profile-portable OAuth state
+>   shows up later.
+> - **Still not done**: Stream 4 (verification) needs a live run — opening the window, actually
+>   completing Google's consent, confirming the account reads mail and that closing the window
+>   returns noctmalia to headless. That needs a human at the keyboard for the consent screen
+>   itself and has not been run end-to-end yet.
+
 ---
 
 ## Context

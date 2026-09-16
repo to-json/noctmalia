@@ -133,6 +133,14 @@ pub enum Message {
     OpenLink(String),
     /// Hand the whole message to whatever the desktop opens `.eml` with.
     External,
+    /// Put Thunderbird's own window on screen, landed on its account-setup dialog — the only way
+    /// OAuth consent can finish, since headless has nowhere for Google's screen to render. Named
+    /// for what it actually opens, not for the one thing it's usually opened to do: this puts the
+    /// *whole* native Thunderbird in front of the user, not a scoped dialog — closing or
+    /// minimizing that dialog leaves its full menu, prefs and other accounts reachable. Caught by
+    /// `app::App::update` before it reaches here, since only the application holds the
+    /// `Supervisor` that can put a window up at all.
+    OpenThunderbirdSettings,
     Compose(Option<Reply>),
     Field(Field, String),
     Body(text_editor::Action),
@@ -894,6 +902,10 @@ impl Mail {
                     Message::Saved,
                 );
             }
+
+            // Intercepted by `app::App::update` before it ever reaches here; a fallback so
+            // `Message` stays matched exhaustively if a caller sends it straight to this surface.
+            Message::OpenThunderbirdSettings => {}
 
             Message::Compose(reply) => return self.compose(reply, shell, now),
             Message::Field(field, value) => {
@@ -2680,6 +2692,11 @@ impl Face for Mail {
             Entry::new("Open elsewhere", Some("O"), Message::External),
             Entry::new("Propose a screening rule", Some("S"), Message::Screen),
             Entry::new("Refresh", Some("<C-r>"), Message::Refresh).exposed(),
+            // Named for what it opens (the whole native app, landed on account setup — see the
+            // `Message` variant's own doc comment), not for the one thing it's usually used for;
+            // `docs/scripting-socket-plan.md`-exposed on purpose, since `tools/oauth_bootstrap.sh`
+            // opens this from the host the same way a person would from the palette.
+            Entry::new("Open Thunderbird settings", None, Message::OpenThunderbirdSettings).exposed(),
         ];
         for (label, purpose, hint) in [
             ("Go to Inbox", "inbox", "g i"),

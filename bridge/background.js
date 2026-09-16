@@ -148,6 +148,7 @@ const methods = {
 
   "accounts.list": ({ includeSubFolders = false } = {}) => messenger.accounts.list(includeSubFolders),
   "accounts.get": ({ accountId, includeSubFolders = false }) => messenger.accounts.get(accountId, includeSubFolders),
+  "accounts.openWizard": () => messenger.noctmalia.openAccountWizard(),
   "identities.list": ({ accountId } = {}) => messenger.identities.list(accountId),
 
   "folders.query": (queryInfo = {}) => messenger.folders.query(queryInfo),
