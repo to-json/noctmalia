@@ -9,9 +9,15 @@ Legend: ✅ verified by running it · ⚠️ partially verified · ❓ untested 
 
 ## 1. Goal
 
-A mail, calendar, contacts and todo client that looks native on a Noctalia desktop, with Thunderbird as the backend. Thunderbird runs headless in Docker and keeps doing accounts, protocols, storage, sync and sending. We replace only the UI.
+A mail, calendar, contacts and todo client that looks native on a Noctalia desktop, with Thunderbird as the backend. Thunderbird runs headless and keeps doing accounts, protocols, storage, sync and sending. We replace only the UI.
 
 ## 2. Architecture
+
+> **2026-09-15: the container is gone — see §11.** noctmalia spawns its own Thunderbird natively, in
+> a systemd user scope, from a pinned build it fetches once. Sections 2 to 4 and 9 below describe
+> the container as it was and are kept as the record of what was verified there; the file paths in
+> §3 that start with `tbd/` or `compose` no longer exist (`bridge/`, `crates/noctmalia/assets/` and
+> `crates/noctmalia/src/thunderbird/` are where that code went).
 
 ```
 ┌─ container: tbd ─────────────────────────────────────────────┐
@@ -115,6 +121,20 @@ docker compose --profile dev down                    # stop (add -v to wipe)
   attempting a real fix). **Reliable workaround:** recreate the `tbd` container
   (`docker compose -f compose.yaml -f compose.ui.yaml up -d --force-recreate tbd`) — this always
   reset it cleanly, every time it was tried.
+
+  **2026-09-15, later — a mechanism that fits, and two fixes.** Reading the code for it rather than
+  waiting for it to happen again: `onDisconnect` used to schedule `connect()` unconditionally, even
+  for a port that was no longer the live one, and `connect()` never checked whether a port already
+  existed. Two overlapping reconnects therefore meant two live shims. The client served whichever
+  attached first and left the other in the listen backlog — and the shim's state file says
+  `connected` the moment the kernel accepts, served or not. The old shim's `{"shim":"connected"}`
+  then triggered a hello that `send()` wrote down the *new* port, into the connection nobody was
+  reading: exactly "state file says connected, no hello". Fixed on both sides: `connect()` is now a
+  no-op while a port exists and only the live port's closing schedules a reconnect
+  (`background.js`), and the client now treats a connection arriving while one is served as its
+  replacement rather than leaving it queued (`noctmalia-bridge`, `Server::serve`). The bridge also
+  numbers connections on stderr and answers `noctmalia-ctl.py status` with which one it is serving,
+  so the next time this is suspected it can be looked at instead of inferred.
 
 ### API gotchas
 - **`messages.send` is an OptionalOnlyPermission.** It is silently ignored in `permissions`. Declare it in `optional_permissions`, grant it through `ExtensionPermissions.add` in privileged code, then call `runtime.reload()` once: permission-gated functions are injected only when the background page starts. The grant persists in `extension-preferences.json`.
@@ -390,3 +410,49 @@ real headless Thunderbird, via `tools/seed.sh`.
 - Dev digests: https://blog.thunderbird.net/2026/03/thunderbird-monthly-development-digest-march-2026/ · https://blog.thunderbird.net/2026/06/thunderbird-monthly-development-digest-june-2026/
 - Noctalia: https://github.com/noctalia-dev/noctalia · plugins: https://docs.noctalia.dev/noctalia/plugins/development/
 - Prior art: https://github.com/noctalia-dev/community-plugins/tree/main/thunderbird-companion · thunderbird-mcp projects (TKasperczyk, bb1, U-C4N, vitalio-sh/thunderbird-cli)
+
+## 11. One program (2026-09-15)
+
+`docs/one-program-plan.md`, built. noctmalia fetches Thunderbird 155.0.1 from Mozilla once (SHA-512
+checked, `curl` and `tar` as subprocesses, no HTTP client in the binary), provisions a private
+profile under `$XDG_DATA_HOME/noctmalia`, and spawns it headless under `systemd-run --user --scope
+--unit noctmalia-thunderbird` from a supervisor thread that lives as long as the window; on close
+it asks for a clean exit and waits. `crates/noctmalia/src/thunderbird/`. What Stream 0 found, by hand
+(`spike/native-probe/run.sh`), and what building it added:
+
+- ✅ **Native headless under a scope, attached in about ten seconds.** The native-messaging manifest
+  in `~/.mozilla/native-messaging-hosts/` is honoured for a `--profile` launch; it admits only
+  `bridge@noctmalia`, so a Thunderbird of the user's own ignores it.
+- ✅ **The environment has to be an allowlist.** The nix devshell's `LD_LIBRARY_PATH` names nix's Mesa
+  and glvnd; a Mozilla build links system GTK, and the two do not mix. The child gets `HOME`, `PATH`,
+  `XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS`, `LANG`, `LC_ALL`, `TZ`, the socket, and nothing else.
+- ✅ **SIGTERM is not a clean exit for Gecko.** No shutdown observers run; the `lock` symlink stays and
+  every WAL stays open. `bridge.quit` (the Experiment calling `Services.startup.quit(eForceQuit)`)
+  is: the scope collects itself, `lock` is gone, `sessionCheckpoints.json` records
+  `profile-before-change`. The supervisor asks first and only stops the scope from outside if the
+  ask goes unanswered for ten seconds. The reply to `bridge.quit` usually loses the race with the
+  exit and comes back as "not connected"; that is success.
+- ✅ **The pinned build would un-pin itself.** `app.update.enabled` is gone in 155 and the updater
+  ships in the tarball; the container was safe only because `/opt` was root-owned. Natively,
+  `distribution/policies.json` (`DisableAppUpdate`) is written into the install, and `user.js` also
+  points `services.settings.server` at the documented dummy, since the first native run showed
+  Thunderbird polling remote settings on boot.
+- ✅ **A windowed launch on the same profile attaches too** (`MOZ_ENABLE_WAYLAND=1`, no `--headless`).
+  This is the primitive `docs/oauth-plan.md` Stream 2.4 will build the account window on. Nothing
+  drives the wizard yet.
+- ✅ **`PR_SET_PDEATHSIG` is per spawning thread.** The supervisor spawns from its own long-lived thread,
+  never from a tokio worker.
+- ⚠️ **Two Thunderbirds on one socket thrash.** Found live: the old container was still up while the
+  native one started, and the bridge's replace-on-reconnect (built the same day) had the two shims
+  replacing each other 57,000 times in two minutes, each hello firing a resync. The bridge now
+  refuses a newcomer within five seconds of the last attach and says so once a minute. In the
+  one-program world there is only ever one Thunderbird pointed at the socket; the guard is for the
+  day there is not.
+- **Tooling:** `noctmalia --dev` turns on the bridge's dev pref and the control socket's raw `call`
+  and `wait` (with a numbered event log, what `mailnd-stub.py` used to provide). `seed.py` and
+  `smoke.sh` go through those; GreenMail is the one container left, run by `smoke.sh` on the
+  loopback as a fixture. `tbd/`, `compose*.yaml`, `mailnd-stub.py` and `bridgectl.py` are deleted;
+  `scripts/with-docker.sh` stays for smoke.
+- **Left for after, on purpose** (see the plan): the shim in Rust (it is still `nm-shim.py`, written
+  from the binary into `$XDG_DATA_HOME/noctmalia`), single-instance, restart backoff beyond one
+  retry, profile import, and the account wizard.

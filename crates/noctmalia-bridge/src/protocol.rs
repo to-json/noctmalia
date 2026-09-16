@@ -1,4 +1,4 @@
-//! Wire types for bridge protocol v1 (`tbd/README.md`).
+//! Wire types for bridge protocol v1 (`docs/bridge-protocol.md`).
 //!
 //! One JSON object per line in each direction. We send requests and receive replies and events;
 //! the shim's own `{"shim": ...}` notices go to the extension, never to us.

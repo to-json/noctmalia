@@ -10,15 +10,59 @@
 //! [`responsive`] is what makes this work without a hand-written `Widget` impl: its closure runs
 //! at layout time with the real available width, which is also the one litehtml needs to lay a
 //! block-flow document out — a canvas can't sensibly report its own height until that layout has
-//! already happened once.
+//! already happened once. Layout time is every frame, though, and a litehtml pass is two walks of
+//! the document with a font shaper in the loop, so [`Cache`] remembers the last one: the same
+//! document at the same width is the same layout, and only a resize or another letter costs one.
 
 use iced::advanced::text::Paragraph as _;
 use iced::widget::canvas::{self, Frame, Geometry};
 use iced::widget::{canvas as canvas_widget, responsive};
 use iced::{Color, Element, Length, Pixels, Point, Rectangle, Size};
 use iced_graphics::text::Paragraph;
-use litehtml_sys::Kind;
+use litehtml_sys::{Kind, Primitive};
 use noctalia_iced::theme;
+use std::cell::RefCell;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::rc::Rc;
+
+/// The last layout: which document, at what width, and what came out. Owned by whoever holds
+/// the letter and handed to [`view`] on every frame; interior mutability because `view` runs on
+/// `&self` and the layout happens inside it.
+#[derive(Default)]
+pub struct Cache {
+    laid: RefCell<Option<Laid>>,
+}
+
+struct Laid {
+    document: u64,
+    width: i32,
+    primitives: Rc<Vec<Primitive>>,
+}
+
+impl Cache {
+    /// The primitives for `html` at `width`, laid out now if the last layout was of something
+    /// else.
+    fn layout(&self, html: &str, width: i32) -> Rc<Vec<Primitive>> {
+        let document = {
+            let mut hasher = DefaultHasher::new();
+            html.hash(&mut hasher);
+            hasher.finish()
+        };
+        if let Some(laid) = self.laid.borrow().as_ref()
+            && laid.document == document
+            && laid.width == width
+        {
+            return Rc::clone(&laid.primitives);
+        }
+        // litehtml rejecting the document outright (see shim.cpp's negative-count path) is
+        // nothing to paint, and a zero-height canvas is the honest reflection of that.
+        let primitives = Rc::new(
+            litehtml_sys::render_with_measure(html, width, i32::MAX, &mut measure).map_or(Vec::new(), |r| r.primitives),
+        );
+        *self.laid.borrow_mut() = Some(Laid { document, width, primitives: Rc::clone(&primitives) });
+        primitives
+    }
+}
 
 /// Measures `text` set at `size_px` in the app's own UI typeface, through iced's real shaper
 /// (`iced_graphics::text::Paragraph`, the same one that will later actually paint it) — not a
@@ -39,24 +83,14 @@ fn measure(text: &str, size_px: i32) -> i32 {
     paragraph.min_width().ceil() as i32
 }
 
-/// Renders `html` as a scrollable-height canvas filling whatever width its parent gives it.
-pub fn view<'a, Message: 'a>(html: &str) -> Element<'a, Message> {
-    let html = html.to_string();
+/// Renders `html` — already through `mime::html::restrict`; this module trusts its caller for
+/// that — as a scrollable-height canvas filling whatever width its parent gives it.
+pub fn view<'a, Message: 'a>(html: &'a str, cache: &'a Cache) -> Element<'a, Message> {
     responsive(move |size| {
         let available = (size.width.max(1.0) as i32).max(1);
-        let rendered = litehtml_sys::render_with_measure(&html, available, i32::MAX, &mut measure);
-
-        let (primitives, height) = match rendered {
-            Some(r) => {
-                let bottom =
-                    r.primitives.iter().fold(0.0_f32, |max, p| max.max((p.y + p.h) as f32));
-                (r.primitives, bottom + f32::from(PADDING_BOTTOM))
-            }
-            // litehtml rejected the document outright (see shim.cpp's negative-count path) —
-            // nothing to paint, and a zero-height canvas is the honest reflection of that.
-            None => (Vec::new(), 0.0),
-        };
-
+        let primitives = cache.layout(html, available);
+        let bottom = primitives.iter().fold(0.0_f32, |max, p| max.max((p.y + p.h) as f32));
+        let height = if primitives.is_empty() { 0.0 } else { bottom + f32::from(PADDING_BOTTOM) };
         canvas_widget::Canvas::new(HtmlView { primitives }).width(Length::Fill).height(Length::Fixed(height)).into()
     })
     .into()
@@ -65,7 +99,7 @@ pub fn view<'a, Message: 'a>(html: &str) -> Element<'a, Message> {
 const PADDING_BOTTOM: u16 = 24;
 
 struct HtmlView {
-    primitives: Vec<litehtml_sys::Primitive>,
+    primitives: Rc<Vec<Primitive>>,
 }
 
 impl<Message> canvas::Program<Message> for HtmlView {
@@ -80,7 +114,7 @@ impl<Message> canvas::Program<Message> for HtmlView {
         _cursor: iced::advanced::mouse::Cursor,
     ) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
-        for primitive in &self.primitives {
+        for primitive in self.primitives.iter() {
             let [r, g, b, a] = primitive.color();
             let color = Color::from_rgba(r, g, b, a);
             let top_left = Point::new(primitive.x as f32, primitive.y as f32);
@@ -128,6 +162,7 @@ mod tests {
     }
 
     fn render_with_measure(html: &str, width: i32, height: i32) -> litehtml_sys::Rendered {
-        litehtml_sys::render_with_measure(html, width, height, &mut measure).expect("litehtml should accept this document")
+        litehtml_sys::render_with_measure(html, width, height, &mut measure)
+            .expect("litehtml should accept this document")
     }
 }

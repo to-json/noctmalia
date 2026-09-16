@@ -221,6 +221,17 @@ this.noctmalia = class extends ExtensionAPI {
           return missing;
         },
 
+        // A clean exit, on request. SIGTERM is an instant death for Gecko — no shutdown
+        // observers run, the profile lock stays, WAL files stay open — so the process that owns
+        // this Thunderbird asks it to leave through the front door instead. Resolves before the
+        // quit lands, since the reply has to cross the bridge first.
+        async quit() {
+          Services.tm.dispatchToMainThread(() => {
+            Services.startup.quit(Ci.nsIAppStartup.eForceQuit);
+          });
+          return true;
+        },
+
         async checkMail(accountId) {
           const accounts = accountId
             ? [MailServices.accounts.getAccount(accountId)]

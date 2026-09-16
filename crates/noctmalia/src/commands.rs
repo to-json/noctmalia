@@ -40,7 +40,12 @@ impl<M> Entry<M> {
     /// actually sends — `app::Message::Mail`, say — the way [`crate::surfaces::Pressed`] does for
     /// a key press.
     pub fn map<M2>(self, f: impl FnOnce(M) -> M2) -> Entry<M2> {
-        Entry { label: self.label, hint: self.hint, message: f(self.message), exposed_to_socket: self.exposed_to_socket }
+        Entry {
+            label: self.label,
+            hint: self.hint,
+            message: f(self.message),
+            exposed_to_socket: self.exposed_to_socket,
+        }
     }
 }
 
@@ -62,7 +67,13 @@ pub struct Command<M> {
 
 impl<M> Command<M> {
     pub fn from_entry(surface: Surface, entry: Entry<M>) -> Command<M> {
-        Command { surface, label: entry.label, hint: entry.hint, message: entry.message, exposed_to_socket: entry.exposed_to_socket }
+        Command {
+            surface,
+            label: entry.label,
+            hint: entry.hint,
+            message: entry.message,
+            exposed_to_socket: entry.exposed_to_socket,
+        }
     }
 }
 

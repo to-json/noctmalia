@@ -1953,6 +1953,7 @@ dependencies = [
  "iced_graphics",
  "iced_selector",
  "iced_test",
+ "libc",
  "litehtml-sys",
  "noctalia-iced",
  "noctmalia-bridge",

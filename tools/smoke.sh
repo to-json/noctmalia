@@ -1,25 +1,40 @@
 #!/usr/bin/env bash
-# End-to-end check of tbd against GreenMail, run from a fresh stack:
-# bridge handshake, account provisioning, headless IMAP fetch and onNewMailReceived,
-# SMTP send through Thunderbird, Gloda threading and search, a reply that threads,
-# a message filter, and a calendar round trip.
-# Wipes the compose volumes (the Thunderbird profile included).
+# End-to-end check of the whole thing against a real mail server, from a fresh profile:
+# noctmalia starts its own Thunderbird, the bridge says hello, an account is provisioned, mail
+# genuinely arrives (SMTP into GreenMail, headless IMAP fetch, onNewMailReceived), a send goes out
+# through Thunderbird's SMTP, Gloda threads and searches, a reply threads, a filter reaches
+# msgFilterRules.dat, a calendar event round-trips, and the window's exit takes Thunderbird down
+# cleanly. Wipes our Thunderbird profile.
+#
+# GreenMail is the one container left: a mail server that genuinely delivers, run only here, as a
+# fixture. Everything else is native.
 #
 # The Gloda and filter steps ride Thunderbird internals rather than the WebExtension API
 # (docs/mail-plan.md risk 4), so they are the ones to run on every Thunderbird bump.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-export TBD_EXTRA_PREFS='user_pref("extensions.noctmalia.dev", true);'
+profile="${XDG_DATA_HOME:-$HOME/.local/share}/noctmalia/profile"
+log="${XDG_STATE_HOME:-$HOME/.local/state}/noctmalia/smoke-noctmalia.log"
+greenmail=noctmalia-greenmail
 
-dc() { docker compose --profile dev "$@"; }
-ctl() { dc exec -T mailnd python /tools/bridgectl.py "$@"; }
+dk() { scripts/with-docker.sh docker "$@"; }
+ctl() { tools/noctmalia-ctl.py "$@"; }
 py() { python3 -c "import json,sys; d=json.load(sys.stdin); $1"; }
 step() { printf '\n== %s\n' "$*"; }
 fail() { printf '\nFAIL: %s\n' "$*" >&2; exit 1; }
+seq_now() { ctl status | py 'print(d["seq"])'; }
+
+cleanup() {
+  pkill -TERM -x noctmalia >/dev/null 2>&1 || true
+  for _ in $(seq 40); do pgrep -x noctmalia >/dev/null || break; sleep 0.25; done
+  systemctl --user stop noctmalia-thunderbird.scope >/dev/null 2>&1 || true
+  dk rm -f "$greenmail" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
 
 inject_mail() {
-  dc exec -T mailnd python - "$1" <<'EOF'
+  python3 - "$1" <<'PY'
 import smtplib, sys
 from email.message import EmailMessage
 m = EmailMessage()
@@ -28,9 +43,9 @@ m["From"], m["To"], m["Subject"] = "Alice <alice@example.com>", "j@noctmalia.tes
 # synthesises `md5:...` for its own index and writes no In-Reply-To at all.
 m["Message-ID"] = "<%s@smoke.example>" % sys.argv[1].replace(" ", "-")
 m.set_content("hello from greenmail")
-with smtplib.SMTP("greenmail", 3025) as s:
+with smtplib.SMTP("127.0.0.1", 3025) as s:
     s.send_message(m)
-EOF
+PY
 }
 
 # Checks mail until an onNewMailReceived newer than $1 carries subject $2; prints the event.
@@ -49,27 +64,38 @@ await_new_mail() {
   return 1
 }
 
-step "fresh stack"
-dc down -v --remove-orphans >/dev/null 2>&1 || true
-dc up -d --build --wait --wait-timeout 400
+step "GreenMail, on the loopback"
+dk rm -f "$greenmail" >/dev/null 2>&1 || true
+dk run -d --rm --name "$greenmail" -p 127.0.0.1:3025:3025 -p 127.0.0.1:3143:3143 \
+  -e GREENMAIL_OPTS="-Dgreenmail.setup.test.smtp -Dgreenmail.setup.test.imap -Dgreenmail.hostname=0.0.0.0 -Dgreenmail.users=$(python3 tools/fixture.py greenmail-users)" \
+  greenmail/standalone:2.1.13 >/dev/null
+for _ in $(seq 60); do python3 -c 'import socket; socket.create_connection(("127.0.0.1", 3025), 1)' 2>/dev/null && break; sleep 1; done
+
+step "fresh profile, and the window starts its own Thunderbird"
+pkill -TERM -x noctmalia >/dev/null 2>&1 || true
+for _ in $(seq 40); do pgrep -x noctmalia >/dev/null || break; sleep 0.25; done
+systemctl --user stop noctmalia-thunderbird.scope >/dev/null 2>&1 || true
+rm -rf "$profile"
+mkdir -p "$(dirname "$log")"
+scripts/run.sh --dev > "$log" 2>&1 &
+for _ in $(seq 600); do ctl status >/dev/null 2>&1 && break; sleep 1; done
+ctl status >/dev/null 2>&1 || fail "no control socket after ten minutes (a cold release build?) — see $log"
 
 step "bridge handshake"
-ctl wait bridge.hello --timeout 300 \
+ctl wait bridge.hello --after 0 --timeout 300 \
   | py 'h=d["data"]; print("Thunderbird %s, bridge %s, protocol %s, calendar=%s" % (h["browser"]["version"], h["bridgeVersion"], h["protocol"], h["calendar"])); sys.exit(0 if h["calendar"] else 1)' \
   || fail "no bridge.hello or calendar API missing"
+ctl status | py 'tb=d["thunderbird"]; print("thunderbird pid %s in %s, connection %s" % (tb["pid"], tb["scope"], d["connection"])); sys.exit(0 if tb["scope"] else 1)' \
+  || fail "Thunderbird is not in its scope"
 
 step "provision GreenMail account"
-ACCOUNT=$(ctl call dev.provisionAccount '{
-  "name": "greenmail", "email": "j@noctmalia.test", "fullName": "J",
-  "imap": {"host": "greenmail", "port": 3143, "socketType": "plain", "username": "j", "password": "secret"},
-  "smtp": {"host": "greenmail", "port": 3025, "socketType": "plain", "auth": "none"}
-}' | py 'print(d["accountId"])')
+ACCOUNT=$(ctl call dev.provisionAccount "$(python3 -c 'import json, sys; sys.path.insert(0, "tools"); import fixture; print(json.dumps(fixture.ACCOUNTS[0]))')" | py 'print(d["accountId"])')
 echo "account $ACCOUNT"
 IDENTITY=$(ctl call identities.list "{\"accountId\":\"$ACCOUNT\"}" | py 'print(d[0]["id"])')
 echo "identity $IDENTITY"
 
 step "inbound: SMTP into GreenMail → headless IMAP fetch → onNewMailReceived"
-SEQ=$(ctl status | py 'print(d["seq"])')
+SEQ=$(seq_now)
 inject_mail "smoke inbound"
 EVENT=$(await_new_mail "$SEQ" "smoke inbound" "$ACCOUNT") || fail "no onNewMailReceived for inbound mail"
 INBOX=$(echo "$EVENT" | py 'print(d["data"]["folder"]["id"])')
@@ -81,14 +107,14 @@ ctl call messages.getFull "{\"messageId\":$MESSAGE}" \
 ctl call messages.list "{\"folderId\":\"$INBOX\"}" | py 'print("inbox subjects:", [m["subject"] for m in d["messages"]])'
 
 step "outbound: messages.send via Thunderbird SMTP → back into inbox"
-SEQ=$(ctl status | py 'print(d["seq"])')
-ctl call messages.send "{\"details\":{\"identityId\":\"$IDENTITY\",\"to\":[\"j@noctmalia.test\"],\"subject\":\"smoke outbound\",\"plainTextBody\":\"sent by tbd\",\"isPlainText\":true}}" \
+SEQ=$(seq_now)
+ctl call messages.send "{\"details\":{\"identityId\":\"$IDENTITY\",\"to\":[\"j@noctmalia.test\"],\"subject\":\"smoke outbound\",\"plainTextBody\":\"sent by noctmalia\",\"isPlainText\":true}}" \
   | py 'print("send:", d["mode"], d.get("headerMessageId"))' || fail "messages.send failed"
 await_new_mail "$SEQ" "smoke outbound" "$ACCOUNT" >/dev/null || fail "sent message never arrived"
 echo "sent message received"
 
 step "flags + events"
-SEQ=$(ctl status | py 'print(d["seq"])')
+SEQ=$(seq_now)
 ctl call messages.update "{\"messageIds\":[$MESSAGE],\"properties\":{\"read\":true,\"flagged\":true}}" >/dev/null
 ctl wait messages.onUpdated --after "$SEQ" --timeout 30 | py 'print("onUpdated:", d["data"]["changed"])' || fail "no onUpdated"
 
@@ -124,7 +150,7 @@ REPLY_ID=$(ctl call compose.reply "{
   \"details\": {\"identityId\": \"$IDENTITY\", \"to\": [\"j@noctmalia.test\"],
                 \"subject\": \"Re: smoke inbound\",
                 \"plainTextBody\": \"a **markdown** reply\", \"isPlainText\": true}
-}" --timeout 180 | py 'print(d["headerMessageId"])') || fail "compose.reply failed"
+}" | py 'print(d["headerMessageId"])') || fail "compose.reply failed"
 echo "reply $REPLY_ID"
 
 SENT=$(ctl call messages.query "{\"headerMessageId\":\"$REPLY_ID\",\"autoPaginationTimeout\":0}" \
@@ -169,7 +195,7 @@ ctl call filters.create "{\"accountId\":\"$ACCOUNT\",\"name\":\"smoke rule\",\"h
 ctl call filters.list "{\"accountId\":\"$ACCOUNT\"}" \
   | py 'print("rules:", [(r["name"], r["summary"]) for r in d]); sys.exit(0 if any(r["name"]=="smoke rule" for r in d) else 1)' \
   || fail "the rule is not in the filter list"
-if dc exec -T tbd sh -c 'cat /data/profile/ImapMail/*/msgFilterRules.dat 2>/dev/null' | grep -q "smoke rule"; then
+if cat "$profile"/ImapMail/*/msgFilterRules.dat 2>/dev/null | grep -q "smoke rule"; then
   echo "and it is in msgFilterRules.dat, which is where it lives"
 else
   fail "the rule is not in msgFilterRules.dat"
@@ -194,7 +220,16 @@ step "calendar round trip"
 CAL=$(ctl call calendar.calendars.create '{"type":"storage","url":"moz-storage-calendar://","name":"smoke"}' | py 'print(d["id"])')
 NOW=$(date -u +%Y%m%dT%H%M%SZ)
 ctl call calendar.items.create "{\"calendarId\":\"$CAL\",\"id\":\"smoke-1\",\"type\":\"event\",\"format\":\"ical\",\"item\":\"BEGIN:VCALENDAR\\r\\nVERSION:2.0\\r\\nPRODID:-//noctmalia//smoke//EN\\r\\nBEGIN:VEVENT\\r\\nUID:smoke-1\\r\\nSUMMARY:standup\\r\\nDTSTART:$NOW\\r\\nDURATION:PT15M\\r\\nRRULE:FREQ=DAILY;COUNT=3\\r\\nEND:VEVENT\\r\\nEND:VCALENDAR\\r\\n\"}" >/dev/null
-ctl call calendar.items.query "{\"calendarId\":\"$CAL\",\"expand\":true,\"rangeStart\":\"$NOW\",\"rangeEnd\":\"$(date -u -v+7d +%Y%m%dT%H%M%SZ 2>/dev/null || date -u -d '+7 days' +%Y%m%dT%H%M%SZ)\"}" \
+ctl call calendar.items.query "{\"calendarId\":\"$CAL\",\"expand\":true,\"rangeStart\":\"$NOW\",\"rangeEnd\":\"$(date -u -d '+7 days' +%Y%m%dT%H%M%SZ)\"}" \
   | py 'print("occurrences:", [i["instance"] for i in d]); sys.exit(0 if len(d)==3 else 1)' || fail "expected 3 occurrences"
+
+step "the window closes, and Thunderbird leaves with it"
+pkill -TERM -x noctmalia
+for _ in $(seq 80); do pgrep -x noctmalia >/dev/null || break; sleep 0.25; done
+pgrep -x noctmalia >/dev/null && fail "noctmalia is still running 20s after SIGTERM"
+systemctl --user is-active --quiet noctmalia-thunderbird.scope && fail "Thunderbird's scope outlived the window"
+[ -e "$profile/lock" ] && fail "the profile is still locked: Thunderbird was killed, not asked"
+grep -q "stopping Thunderbird" "$log" || fail "the window did not stop Thunderbird on the way out"
+echo "scope gone, profile unlocked"
 
 printf '\nPASS\n'

@@ -17,7 +17,7 @@
 use crate::calendar::{self, Cal, Item};
 use crate::ical::{self, Event, Recur, When};
 use crate::shell::Shell;
-use crate::surfaces::{self, Pressed, Surface};
+use crate::surfaces::{self, Face, Pressed, Surface};
 use crate::ui::{self, ROW_GAP, icon};
 #[cfg(test)]
 use chrono::Weekday;
@@ -57,11 +57,8 @@ fn scroll_to_morning() -> Task<Message> {
 /// left as "an event" when the payload parses (it always should; the fallback is for a shape this
 /// has never actually been seen in).
 fn alarm_message(data: &Value) -> String {
-    let title = data
-        .get("item")
-        .cloned()
-        .and_then(|node| calendar::item_from_node(node).ok())
-        .map(|item| item.event.summary);
+    let title =
+        data.get("item").cloned().and_then(|node| calendar::item_from_node(node).ok()).map(|item| item.event.summary);
     match title {
         Some(title) => format!("Reminder — {title}"),
         None => "Reminder".to_string(),
@@ -85,6 +82,8 @@ pub enum Message {
     Step(i32),
     New(NaiveDate, Option<u32>),
     Open(String),
+    /// The series an occurrence belongs to, fetched so it can be edited as itself.
+    Master(calendar::Result<Box<Item>>),
     Calendar(String),
     Field(Field, String),
     AllDay(bool),
@@ -184,19 +183,31 @@ thread_local! {
 
 // ── The editor ──────────────────────────────────────────────────────────────
 
-/// The panel that creates or edits one event. Dates and times are kept as the text the user is
-/// typing rather than parsed eagerly — `Message::Save` is where they are made sense of, so a
-/// half-typed date does not fight the user for what it means yet.
+/// The panel that creates or edits one event: what is being typed, and nothing else.
+///
+/// Every field is the text in its box. Dates and times are made sense of in [`compose`], so a
+/// half-typed date does not fight the user for what it means yet. What the form does not show —
+/// the UID, the organiser and guests, a custom recurrence rule — rides along in `original` and
+/// goes back out untouched, which is the whole reason the [`Event`] is kept apart from the form
+/// rather than edited in place.
 struct Editor {
     /// `None` while creating.
     id: Option<String>,
     calendar_id: String,
-    event: Event,
+    /// The event as Thunderbird holds it, for everything the form does not edit. `None` while
+    /// creating.
+    original: Option<Event>,
+    title: String,
+    location: String,
+    description: String,
+    /// The raw `RRULE`, kept opaque so a custom rule survives a save that does not touch it.
+    rrule: Option<String>,
+    alarms: Vec<ChronoDuration>,
     all_day: bool,
     start_date: String,
     start_time: String,
-    /// The last calendar day, inclusive — not `event.end`'s exclusive bound — because that is how
-    /// a person names the last day of a trip.
+    /// The last calendar day, inclusive — not the exclusive bound the format uses — because that
+    /// is how a person names the last day of a trip.
     end_date: String,
     end_time: String,
 }
@@ -206,21 +217,15 @@ impl Editor {
         let all_day = hour.is_none();
         let start_time = hour.map_or_else(|| "09:00".to_string(), |hour| format!("{hour:02}:00"));
         let end_time = hour.map_or_else(|| "10:00".to_string(), |hour| format!("{:02}:00", (hour + 1).min(23)));
-        let start = if all_day {
-            When::Date(day)
-        } else {
-            let at = NaiveTime::from_hms_opt(hour.unwrap_or(9), 0, 0).unwrap_or_default();
-            When::Time(ical::local_from_naive(day.and_time(at)))
-        };
-        let end = if all_day {
-            When::Date(day.succ_opt().unwrap_or(day))
-        } else {
-            When::Time(start.instant() + ChronoDuration::hours(1))
-        };
         Editor {
             id: None,
             calendar_id,
-            event: Event::blank(start, end),
+            original: None,
+            title: String::new(),
+            location: String::new(),
+            description: String::new(),
+            rrule: None,
+            alarms: Vec::new(),
             all_day,
             start_date: format_date(day),
             start_time,
@@ -230,23 +235,70 @@ impl Editor {
     }
 
     fn from_item(item: &Item) -> Editor {
-        let event = item.event.clone();
+        let event = &item.event;
         let all_day = event.start.is_all_day();
         let end_date = if all_day { event.last_day() } else { event.end.date() };
-        let time_of = |when: &When| match when {
+        // For an all-day event the times are only what a switch to timed would start from.
+        let time_of = |when: &When, fallback: &str| match when {
             When::Time(time) => time.format("%H:%M").to_string(),
-            When::Date(_) => "09:00".to_string(),
+            When::Date(_) => fallback.to_string(),
         };
         Editor {
             id: Some(item.id.clone()),
             calendar_id: item.calendar_id.clone(),
-            start_date: format_date(event.start.date()),
-            start_time: time_of(&event.start),
-            end_date: format_date(end_date),
-            end_time: time_of(&event.end),
+            title: event.summary.clone(),
+            location: event.location.clone(),
+            description: event.description.clone(),
+            rrule: event.rrule.clone(),
+            alarms: event.alarms.clone(),
             all_day,
-            event,
+            start_date: format_date(event.start.date()),
+            start_time: time_of(&event.start, "09:00"),
+            end_date: format_date(end_date),
+            end_time: time_of(&event.end, "10:00"),
+            original: Some(event.clone()),
         }
+    }
+
+    /// Whether a save changes every occurrence of a series, which is worth saying on the panel.
+    fn series(&self) -> bool {
+        self.rrule.is_some()
+    }
+
+    /// The event the form describes, or the one thing wrong with it, in the words the banner
+    /// says.
+    fn compose(&self) -> Result<Event, &'static str> {
+        if self.title.trim().is_empty() {
+            return Err("Give the event a title");
+        }
+        let start_date = NaiveDate::parse_from_str(self.start_date.trim(), "%Y-%m-%d")
+            .map_err(|_| "Start date should look like 2026-09-14")?;
+        let end_date = NaiveDate::parse_from_str(self.end_date.trim(), "%Y-%m-%d")
+            .map_err(|_| "End date should look like 2026-09-14")?;
+        let (start, end) = if self.all_day {
+            (When::Date(start_date), When::Date(end_date.succ_opt().unwrap_or(end_date)))
+        } else {
+            let start_time = NaiveTime::parse_from_str(self.start_time.trim(), "%H:%M")
+                .map_err(|_| "Start time should look like 09:00")?;
+            let end_time = NaiveTime::parse_from_str(self.end_time.trim(), "%H:%M")
+                .map_err(|_| "End time should look like 10:00")?;
+            (
+                When::Time(ical::local_from_naive(start_date.and_time(start_time))),
+                When::Time(ical::local_from_naive(end_date.and_time(end_time))),
+            )
+        };
+        if end.instant() <= start.instant() {
+            return Err("End has to be after start");
+        }
+        let mut event = self.original.clone().unwrap_or_else(|| Event::blank(start.clone(), end.clone()));
+        event.summary = self.title.clone();
+        event.location = self.location.clone();
+        event.description = self.description.clone();
+        event.rrule = self.rrule.clone();
+        event.alarms = self.alarms.clone();
+        event.start = start;
+        event.end = end;
+        Ok(event)
     }
 }
 
@@ -297,202 +349,15 @@ impl Calendar {
         }
     }
 
-    pub fn update(&mut self, message: Message, shell: &mut Shell, now: Instant) -> Task<Message> {
-        match message {
-            Message::ContextMenu(..) => {}
-            Message::Cals(Ok(mut cals)) => {
-                cals.sort_by_key(|cal| cal.name.to_lowercase());
-                self.cals = cals;
-                return self.reload(shell);
-            }
-            Message::Cals(Err(error)) => shell.fail(error, now),
-
-            Message::Items(generation, result) => {
-                if generation != self.generation {
-                    return Task::none();
-                }
-                self.loading = false;
-                match result {
-                    Ok(items) => self.items = items,
-                    Err(error) => shell.fail(error, now),
-                }
-            }
-
-            Message::Toggle(id) => {
-                if let Some(cal) = self.cals.iter_mut().find(|cal| cal.id == id) {
-                    cal.hidden = !cal.hidden;
-                    let visible = !cal.hidden;
-                    return Task::batch([
-                        Task::perform(calendar::set_visible(shell.bridge(), id, visible), Message::Visible),
-                        self.reload(shell),
-                    ]);
-                }
-            }
-            Message::Visible(Err(error)) => shell.fail(error, now),
-            Message::Visible(Ok(())) => {}
-
-            Message::View(view) => {
-                self.view = view;
-                return self.reload_and_maybe_scroll(shell);
-            }
-            Message::Today => {
-                self.anchor = Local::now().date_naive();
-                return self.reload_and_maybe_scroll(shell);
-            }
-            Message::JumpTo(day) => {
-                self.anchor = day;
-                return self.reload_and_maybe_scroll(shell);
-            }
-            Message::Step(delta) => {
-                if self.editor.is_some() {
-                    return Task::none();
-                }
-                self.anchor = step(self.anchor, self.view, delta);
-                return self.reload_and_maybe_scroll(shell);
-            }
-
-            Message::New(day, hour) => {
-                let Some(calendar_id) = self.cals.iter().find(|cal| !cal.read_only).map(|cal| cal.id.clone()) else {
-                    shell.fail("No writable calendar", now);
-                    return Task::none();
-                };
-                self.confirming_delete = false;
-                self.editor = Some(Editor::blank(calendar_id, day, hour));
-                return operation::focus(Id::new(TITLE_FIELD));
-            }
-            Message::Open(id) => {
-                if let Some(item) = self.items.iter().find(|item| item.id == id) {
-                    self.confirming_delete = false;
-                    self.editor = Some(Editor::from_item(item));
-                    return operation::focus(Id::new(TITLE_FIELD));
-                }
-            }
-            Message::Cancel => {
-                self.editor = None;
-                self.confirming_delete = false;
-            }
-
-            Message::Calendar(id) => {
-                if let Some(editor) = &mut self.editor {
-                    editor.calendar_id = id;
-                }
-            }
-            Message::Field(field, value) => {
-                if let Some(editor) = &mut self.editor {
-                    match field {
-                        Field::Title => editor.event.summary = value,
-                        Field::Location => editor.event.location = value,
-                        Field::Description => editor.event.description = value,
-                        Field::StartDate => editor.start_date = value,
-                        Field::StartTime => editor.start_time = value,
-                        Field::EndDate => editor.end_date = value,
-                        Field::EndTime => editor.end_time = value,
-                    }
-                }
-            }
-            Message::AllDay(all_day) => {
-                if let Some(editor) = &mut self.editor {
-                    editor.all_day = all_day;
-                }
-            }
-            Message::Recur(recur) => {
-                if let Some(editor) = &mut self.editor {
-                    editor.event.rrule = recur.encode();
-                }
-            }
-            Message::ToggleReminder(minutes) => {
-                if let Some(editor) = &mut self.editor {
-                    let duration = ChronoDuration::minutes(minutes);
-                    match editor.event.alarms.iter().position(|alarm| *alarm == duration) {
-                        Some(index) => {
-                            editor.event.alarms.remove(index);
-                        }
-                        None => editor.event.alarms.push(duration),
-                    }
-                }
-            }
-
-            Message::Save => return self.save(shell, now),
-            Message::Saved(Ok(_)) => {
-                self.editor = None;
-                shell.announce("Saved", now);
-                return self.reload(shell);
-            }
-            Message::Saved(Err(error)) => shell.fail(error, now),
-
-            Message::AskDelete => self.confirming_delete = true,
-            Message::Delete => {
-                self.confirming_delete = false;
-                if let Some(editor) = &self.editor
-                    && let Some(id) = editor.id.clone()
-                {
-                    return Task::perform(
-                        calendar::remove(shell.bridge(), editor.calendar_id.clone(), id),
-                        Message::Deleted,
-                    );
-                }
-            }
-            Message::Deleted(Ok(())) => {
-                self.editor = None;
-                shell.announce("Deleted", now);
-                return self.reload(shell);
-            }
-            Message::Deleted(Err(error)) => shell.fail(error, now),
-
-            Message::Escape => {
-                if self.editor.is_some() {
-                    self.editor = None;
-                    self.confirming_delete = false;
-                } else if self.confirming_delete {
-                    self.confirming_delete = false;
-                } else {
-                    shell.hush(now);
-                }
-            }
-            Message::Refresh => return self.reload(shell),
-            Message::Alarm(text) => shell.announce(text, now),
-        }
-        Task::none()
-    }
-
     fn save(&mut self, shell: &mut Shell, now: Instant) -> Task<Message> {
         let Some(editor) = &self.editor else { return Task::none() };
-        if editor.event.summary.trim().is_empty() {
-            shell.fail("Give the event a title", now);
-            return Task::none();
-        }
-        let Ok(start_date) = NaiveDate::parse_from_str(editor.start_date.trim(), "%Y-%m-%d") else {
-            shell.fail("Start date should look like 2026-09-14", now);
-            return Task::none();
-        };
-        let Ok(end_date) = NaiveDate::parse_from_str(editor.end_date.trim(), "%Y-%m-%d") else {
-            shell.fail("End date should look like 2026-09-14", now);
-            return Task::none();
-        };
-        let (start, end) = if editor.all_day {
-            (When::Date(start_date), When::Date(end_date.succ_opt().unwrap_or(end_date)))
-        } else {
-            let Ok(start_time) = NaiveTime::parse_from_str(editor.start_time.trim(), "%H:%M") else {
-                shell.fail("Start time should look like 09:00", now);
+        let event = match editor.compose() {
+            Ok(event) => event,
+            Err(what) => {
+                shell.fail(what, now);
                 return Task::none();
-            };
-            let Ok(end_time) = NaiveTime::parse_from_str(editor.end_time.trim(), "%H:%M") else {
-                shell.fail("End time should look like 10:00", now);
-                return Task::none();
-            };
-            (
-                When::Time(ical::local_from_naive(start_date.and_time(start_time))),
-                When::Time(ical::local_from_naive(end_date.and_time(end_time))),
-            )
+            }
         };
-        if end.instant() <= start.instant() {
-            shell.fail("End has to be after start", now);
-            return Task::none();
-        }
-
-        let mut event = editor.event.clone();
-        event.start = start;
-        event.end = end;
         let calendar_id = editor.calendar_id.clone();
         let bridge = shell.bridge();
         let saved = |result: calendar::Result<Item>| Message::Saved(result.map(Box::new));
@@ -500,86 +365,6 @@ impl Calendar {
             Some(id) => Task::perform(calendar::update(bridge, calendar_id, id, event), saved),
             None => Task::perform(calendar::create(bridge, calendar_id, event), saved),
         }
-    }
-
-    pub fn typed(&self) -> String {
-        self.pending.typed()
-    }
-
-    pub fn entered(&mut self, _now: Instant) {
-        self.pending.clear();
-    }
-
-    pub fn animating(&self, _now: Instant) -> bool {
-        false
-    }
-
-    /// Whether an event is being created or edited — `docs/mode-visual-plan.md`'s "compose" mode.
-    pub fn composing(&self) -> bool {
-        self.editor.is_some()
-    }
-
-    pub fn press(&mut self, key: &Key, modifiers: Modifiers) -> Pressed<Message> {
-        match KEYS.with(|keys| keys.press(&mut self.pending, key, modifiers)) {
-            keymap::Resolved::Ignored => Pressed::Ignored,
-            keymap::Resolved::Pending => Pressed::Pending,
-            keymap::Resolved::Action(Binding::Go(surface), _) => Pressed::Switch(surface),
-            keymap::Resolved::Action(binding, count) => Pressed::Act(match binding {
-                Binding::Today => Message::Today,
-                Binding::Next => Message::Step(count as i32),
-                Binding::Prev => Message::Step(-(count as i32)),
-                Binding::New => Message::New(self.anchor, Some(9)),
-                Binding::Month => Message::View(ViewKind::Month),
-                Binding::Week => Message::View(ViewKind::Week),
-                Binding::Day => Message::View(ViewKind::Day),
-                Binding::Agenda => Message::View(ViewKind::Agenda),
-                Binding::Refresh => Message::Refresh,
-                Binding::Save => Message::Save,
-                Binding::Escape => Message::Escape,
-                Binding::Go(_) => unreachable!("handled above"),
-            }),
-        }
-    }
-
-    pub fn resync(&mut self, shell: &Shell) -> Task<Message> {
-        Task::perform(calendar::calendars(shell.bridge()), Message::Cals)
-    }
-
-    /// The keybound actions worth finding by name — `docs/command-palette-plan.md` §3.2. Pure
-    /// stepping (`Binding::Next`/`Prev`) is left out: it exists to be repeated, not looked up.
-    pub fn commands(&self) -> Vec<crate::commands::Entry<Message>> {
-        use crate::commands::Entry;
-        vec![
-            Entry::new("Jump to today", Some("t"), Message::Today).exposed(),
-            Entry::new("New event", Some("n"), Message::New(self.anchor, Some(9))),
-            Entry::new("Month view", Some("m"), Message::View(ViewKind::Month)).exposed(),
-            Entry::new("Week view", Some("w"), Message::View(ViewKind::Week)).exposed(),
-            Entry::new("Day view", Some("d"), Message::View(ViewKind::Day)).exposed(),
-            Entry::new("Agenda view", Some("a"), Message::View(ViewKind::Agenda)).exposed(),
-            Entry::new("Save event", Some("<C-CR>"), Message::Save),
-            Entry::new("Refresh", Some("<C-r>"), Message::Refresh).exposed(),
-        ]
-    }
-
-    /// The currently loaded rows, as jump targets for quick-open —
-    /// `docs/command-palette-plan.md` §4.2.
-    pub fn quick_items(&self) -> Vec<crate::commands::Entry<Message>> {
-        self.items.iter().map(|item| crate::commands::Entry::new(item.event.summary.clone(), None, Message::Open(item.id.clone()))).collect()
-    }
-
-    pub fn notify(&mut self, name: &str, data: &Value, shell: &Shell) -> Task<Message> {
-        if name == "calendar.items.onAlarm" {
-            // A reminder firing doesn't change what's in a folder or a range — nothing here
-            // needs a reload, only the toast.
-            return Task::done(Message::Alarm(alarm_message(data)));
-        }
-        if name.starts_with("calendar.calendars.") {
-            return self.resync(shell);
-        }
-        if name.starts_with("calendar.items.") {
-            return self.reload(shell);
-        }
-        Task::none()
     }
 
     fn reload(&mut self, shell: &Shell) -> Task<Message> {
@@ -641,14 +426,6 @@ impl Calendar {
     }
 
     // ── View ────────────────────────────────────────────────────────────────
-
-    pub fn view(&self, shell: &Shell, now: Instant) -> Element<'_, Message> {
-        if let Some(editor) = &self.editor {
-            let width = self.grid_width(shell.width()).min(860.0);
-            return row![self.rail(), ui::hairline_y(), self.editor_view(editor, width)].height(Length::Fill).into();
-        }
-        row![self.rail(), ui::hairline_y(), self.body(shell, now)].height(Length::Fill).into()
-    }
 
     /// What the grid has to draw in, once the rail and the body's own padding have taken their
     /// share. The week/day timeline needs this as a real number rather than a `Length::Fill` —
@@ -928,7 +705,11 @@ impl Calendar {
     // ── Editor ─────────────────────────────────────────────────────────────
 
     fn editor_view<'a>(&'a self, editor: &'a Editor, width: f32) -> Element<'a, Message> {
-        let title = if editor.id.is_some() { "Edit event" } else { "New event" };
+        let title = match (editor.id.is_some(), editor.series()) {
+            (false, _) => "New event",
+            (true, false) => "Edit event",
+            (true, true) => "Edit series",
+        };
         let mut heading = row![
             text(title).size(theme::FONT_TITLE).font(theme::semibold()).width(Length::Fill),
             widgets::action("Cancel", ButtonVariant::Tab, Some(Message::Cancel)),
@@ -980,7 +761,7 @@ impl Calendar {
         }
         .spacing(theme::SPACE_SM);
 
-        let recur = editor.event.recur();
+        let recur = Recur::decode(editor.rrule.as_deref());
         let recur_picker = column![
             ui::caption("Repeats"),
             pick_list(&Recur::PRESETS[..], (recur != Recur::Custom).then_some(recur), Message::Recur)
@@ -991,7 +772,7 @@ impl Calendar {
 
         let mut reminders = column![ui::caption("Reminders")].spacing(theme::SPACE_XS);
         for (label, minutes) in REMINDER_PRESETS {
-            let on = editor.event.alarms.iter().any(|alarm| alarm.num_minutes() == minutes);
+            let on = editor.alarms.iter().any(|alarm| alarm.num_minutes() == minutes);
             reminders = reminders.push(
                 checkbox(on)
                     .label(label)
@@ -1000,12 +781,15 @@ impl Calendar {
             );
         }
 
-        let attendees: Element<Message> = if editor.event.organizer.is_some() || !editor.event.attendees.is_empty() {
+        let original = editor.original.as_ref();
+        let organizer = original.and_then(|event| event.organizer.as_ref());
+        let guests = original.map(|event| event.attendees.as_slice()).unwrap_or_default();
+        let attendees: Element<Message> = if organizer.is_some() || !guests.is_empty() {
             let mut names = Vec::new();
-            if let Some(organizer) = &editor.event.organizer {
+            if let Some(organizer) = organizer {
                 names.push(format!("{organizer} (organizer)"));
             }
-            names.extend(editor.event.attendees.iter().cloned());
+            names.extend(guests.iter().cloned());
             column![ui::caption("Guests"), text(names.join(", ")).size(theme::FONT_CAPTION)]
                 .spacing(theme::SPACE_XS)
                 .into()
@@ -1016,7 +800,7 @@ impl Calendar {
         let content = column![
             heading,
             ui::hairline_x(),
-            field("Title", Some(TITLE_FIELD), &editor.event.summary, Field::Title),
+            field("Title", Some(TITLE_FIELD), &editor.title, Field::Title),
             row![
                 column![
                     ui::caption("Calendar"),
@@ -1035,12 +819,12 @@ impl Calendar {
             .spacing(theme::SPACE_SM)
             .align_y(Alignment::Center),
             dates,
-            field("Location", None, &editor.event.location, Field::Location),
+            field("Location", None, &editor.location, Field::Location),
             // No selection to read out of a right-click — `docs/context-commands-plan.md` §0 —
             // so a template runs against the whole description, the same fallback every other
             // plain `text_input` context uses.
-            mouse_area(field("Description", None, &editor.event.description, Field::Description))
-                .on_right_press(Message::ContextMenu(editor.event.description.clone(), "event-description")),
+            mouse_area(field("Description", None, &editor.description, Field::Description))
+                .on_right_press(Message::ContextMenu(editor.description.clone(), "event-description")),
             recur_picker,
             reminders,
             attendees,
@@ -1213,6 +997,284 @@ fn lanes(items: &[&Item]) -> (Vec<usize>, usize) {
     (assignment, lanes)
 }
 
+impl Face for Calendar {
+    type Message = Message;
+    const SURFACE: Surface = Surface::Calendar;
+
+    fn update(&mut self, message: Message, shell: &mut Shell, now: Instant) -> Task<Message> {
+        match message {
+            Message::ContextMenu(..) => {}
+            Message::Cals(Ok(mut cals)) => {
+                cals.sort_by_key(|cal| cal.name.to_lowercase());
+                self.cals = cals;
+                return self.reload(shell);
+            }
+            Message::Cals(Err(error)) => shell.report(&error, now),
+
+            Message::Items(generation, result) => {
+                if generation != self.generation {
+                    return Task::none();
+                }
+                self.loading = false;
+                match result {
+                    Ok(items) => self.items = items,
+                    Err(error) => shell.report(&error, now),
+                }
+            }
+
+            Message::Toggle(id) => {
+                if let Some(cal) = self.cals.iter_mut().find(|cal| cal.id == id) {
+                    cal.hidden = !cal.hidden;
+                    let visible = !cal.hidden;
+                    return Task::batch([
+                        Task::perform(calendar::set_visible(shell.bridge(), id, visible), Message::Visible),
+                        self.reload(shell),
+                    ]);
+                }
+            }
+            Message::Visible(Err(error)) => shell.report(&error, now),
+            Message::Visible(Ok(())) => {}
+
+            Message::View(view) => {
+                self.view = view;
+                return self.reload_and_maybe_scroll(shell);
+            }
+            Message::Today => {
+                self.anchor = Local::now().date_naive();
+                return self.reload_and_maybe_scroll(shell);
+            }
+            Message::JumpTo(day) => {
+                self.anchor = day;
+                return self.reload_and_maybe_scroll(shell);
+            }
+            Message::Step(delta) => {
+                if self.editor.is_some() {
+                    return Task::none();
+                }
+                self.anchor = step(self.anchor, self.view, delta);
+                return self.reload_and_maybe_scroll(shell);
+            }
+
+            Message::New(day, hour) => {
+                let Some(calendar_id) = self.cals.iter().find(|cal| !cal.read_only).map(|cal| cal.id.clone()) else {
+                    shell.fail("No writable calendar", now);
+                    return Task::none();
+                };
+                self.confirming_delete = false;
+                self.editor = Some(Editor::blank(calendar_id, day, hour));
+                return operation::focus(Id::new(TITLE_FIELD));
+            }
+            Message::Open(id) => {
+                let Some(item) = self.items.iter().find(|item| item.id == id) else { return Task::none() };
+                self.confirming_delete = false;
+                if item.instance.is_some() {
+                    // One occurrence of a series. What Thunderbird expanded is that day's copy,
+                    // with that day's start, and there is no call that edits one occurrence; a
+                    // save goes to the series, so what is edited had better be the series — its
+                    // own start, not the occurrence's written over it.
+                    let (calendar_id, id) = (item.calendar_id.clone(), item.id.clone());
+                    return Task::perform(calendar::get(shell.bridge(), calendar_id, id), |result| {
+                        Message::Master(result.map(Box::new))
+                    });
+                }
+                self.editor = Some(Editor::from_item(item));
+                return operation::focus(Id::new(TITLE_FIELD));
+            }
+            Message::Master(Ok(item)) => {
+                self.editor = Some(Editor::from_item(&item));
+                return operation::focus(Id::new(TITLE_FIELD));
+            }
+            Message::Master(Err(error)) => shell.report(&error, now),
+            Message::Cancel => {
+                self.editor = None;
+                self.confirming_delete = false;
+            }
+
+            Message::Calendar(id) => {
+                if let Some(editor) = &mut self.editor {
+                    editor.calendar_id = id;
+                }
+            }
+            Message::Field(field, value) => {
+                if let Some(editor) = &mut self.editor {
+                    match field {
+                        Field::Title => editor.title = value,
+                        Field::Location => editor.location = value,
+                        Field::Description => editor.description = value,
+                        Field::StartDate => editor.start_date = value,
+                        Field::StartTime => editor.start_time = value,
+                        Field::EndDate => editor.end_date = value,
+                        Field::EndTime => editor.end_time = value,
+                    }
+                }
+            }
+            Message::AllDay(all_day) => {
+                if let Some(editor) = &mut self.editor {
+                    editor.all_day = all_day;
+                }
+            }
+            Message::Recur(recur) => {
+                if let Some(editor) = &mut self.editor {
+                    editor.rrule = recur.encode();
+                }
+            }
+            Message::ToggleReminder(minutes) => {
+                if let Some(editor) = &mut self.editor {
+                    let duration = ChronoDuration::minutes(minutes);
+                    match editor.alarms.iter().position(|alarm| *alarm == duration) {
+                        Some(index) => {
+                            editor.alarms.remove(index);
+                        }
+                        None => editor.alarms.push(duration),
+                    }
+                }
+            }
+
+            Message::Save => return self.save(shell, now),
+            Message::Saved(Ok(_)) => {
+                self.editor = None;
+                shell.announce("Saved", now);
+                return self.reload(shell);
+            }
+            Message::Saved(Err(error)) => shell.report(&error, now),
+
+            Message::AskDelete => self.confirming_delete = true,
+            Message::Delete => {
+                self.confirming_delete = false;
+                if let Some(editor) = &self.editor
+                    && let Some(id) = editor.id.clone()
+                {
+                    return Task::perform(
+                        calendar::remove(shell.bridge(), editor.calendar_id.clone(), id),
+                        Message::Deleted,
+                    );
+                }
+            }
+            Message::Deleted(Ok(())) => {
+                self.editor = None;
+                shell.announce("Deleted", now);
+                return self.reload(shell);
+            }
+            Message::Deleted(Err(error)) => shell.report(&error, now),
+
+            Message::Escape => {
+                if self.editor.is_some() {
+                    self.editor = None;
+                    self.confirming_delete = false;
+                } else if self.confirming_delete {
+                    self.confirming_delete = false;
+                } else {
+                    shell.hush(now);
+                }
+            }
+            Message::Refresh => return self.reload(shell),
+            Message::Alarm(text) => shell.announce(text, now),
+        }
+        Task::none()
+    }
+
+    fn view(&self, shell: &Shell, now: Instant) -> Element<'_, Message> {
+        if let Some(editor) = &self.editor {
+            let width = self.grid_width(shell.width()).min(860.0);
+            return row![self.rail(), ui::hairline_y(), self.editor_view(editor, width)].height(Length::Fill).into();
+        }
+        row![self.rail(), ui::hairline_y(), self.body(shell, now)].height(Length::Fill).into()
+    }
+
+    fn press(&mut self, key: &Key, modifiers: Modifiers) -> Pressed<Message> {
+        match KEYS.with(|keys| keys.press(&mut self.pending, key, modifiers)) {
+            keymap::Resolved::Ignored => Pressed::Ignored,
+            keymap::Resolved::Pending => Pressed::Pending,
+            keymap::Resolved::Action(Binding::Go(surface), _) => Pressed::Switch(surface),
+            keymap::Resolved::Action(binding, count) => Pressed::Act(match binding {
+                Binding::Today => Message::Today,
+                Binding::Next => Message::Step(count as i32),
+                Binding::Prev => Message::Step(-(count as i32)),
+                Binding::New => Message::New(self.anchor, Some(9)),
+                Binding::Month => Message::View(ViewKind::Month),
+                Binding::Week => Message::View(ViewKind::Week),
+                Binding::Day => Message::View(ViewKind::Day),
+                Binding::Agenda => Message::View(ViewKind::Agenda),
+                Binding::Refresh => Message::Refresh,
+                Binding::Save => Message::Save,
+                Binding::Escape => Message::Escape,
+                Binding::Go(_) => unreachable!("handled above"),
+            }),
+        }
+    }
+
+    fn notify(&mut self, name: &str, data: &Value, shell: &Shell) -> Task<Message> {
+        if name == "calendar.items.onAlarm" {
+            // A reminder firing doesn't change what's in a folder or a range — nothing here
+            // needs a reload, only the toast.
+            return Task::done(Message::Alarm(alarm_message(data)));
+        }
+        if name.starts_with("calendar.calendars.") {
+            return self.resync(shell);
+        }
+        if name.starts_with("calendar.items.") {
+            return self.reload(shell);
+        }
+        Task::none()
+    }
+
+    fn resync(&mut self, shell: &Shell) -> Task<Message> {
+        Task::perform(calendar::calendars(shell.bridge()), Message::Cals)
+    }
+
+    fn entered(&mut self, _now: Instant) {
+        self.pending.clear();
+    }
+
+    fn animating(&self, _now: Instant) -> bool {
+        false
+    }
+
+    fn typed(&self) -> String {
+        self.pending.typed()
+    }
+
+    /// Whether an event is being created or edited — `docs/mode-visual-plan.md`'s "compose" mode.
+    fn composing(&self) -> bool {
+        self.editor.is_some()
+    }
+
+    /// The keybound actions worth finding by name — `docs/command-palette-plan.md` §3.2. Pure
+    /// stepping (`Binding::Next`/`Prev`) is left out: it exists to be repeated, not looked up.
+    fn commands(&self) -> Vec<crate::commands::Entry<Message>> {
+        use crate::commands::Entry;
+        vec![
+            Entry::new("Jump to today", Some("t"), Message::Today).exposed(),
+            Entry::new("New event", Some("n"), Message::New(self.anchor, Some(9))),
+            Entry::new("Month view", Some("m"), Message::View(ViewKind::Month)).exposed(),
+            Entry::new("Week view", Some("w"), Message::View(ViewKind::Week)).exposed(),
+            Entry::new("Day view", Some("d"), Message::View(ViewKind::Day)).exposed(),
+            Entry::new("Agenda view", Some("a"), Message::View(ViewKind::Agenda)).exposed(),
+            Entry::new("Save event", Some("<C-CR>"), Message::Save),
+            Entry::new("Refresh", Some("<C-r>"), Message::Refresh).exposed(),
+        ]
+    }
+
+    /// The currently loaded rows, as jump targets for quick-open —
+    /// `docs/command-palette-plan.md` §4.2.
+    fn quick_items(&self) -> Vec<crate::commands::Entry<Message>> {
+        // A recurring event is one thing to jump to, however many occurrences are loaded.
+        let mut seen = std::collections::HashSet::new();
+        self.items
+            .iter()
+            .filter(|item| seen.insert(item.id.as_str()))
+            .map(|item| crate::commands::Entry::new(item.event.summary.clone(), None, Message::Open(item.id.clone())))
+            .collect()
+    }
+
+    fn context_menu(message: &Message) -> Option<(&str, &'static str)> {
+        match message {
+            Message::ContextMenu(text, context) => Some((text, context)),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1273,5 +1335,109 @@ mod tests {
         assert_eq!(lanes, 2, "a and b overlap and need two lanes");
         assert_ne!(assignment[0], assignment[1], "overlapping events do not share a lane");
         assert_eq!(assignment[2], assignment[0], "c starts after a ends and can reuse its lane");
+    }
+
+    fn shell() -> Shell {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let which = NEXT.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("noctmalia-calendar-surface-{}-{which}.sock", std::process::id()));
+        let mut shell = Shell::new(noctmalia_bridge::Bridge::spawn(path).expect("a socket"), 1180.0);
+        shell.set_connected(true);
+        shell
+    }
+
+    fn day(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).expect("a real day")
+    }
+
+    /// A weekly standup: the series starts on the 7th, and this is the occurrence on the 14th.
+    fn standup() -> (Item, Item) {
+        let at = |date: NaiveDate, hour: u32| When::Time(ical::local_from_naive(date.and_hms_opt(hour, 0, 0).unwrap()));
+        let mut series = Event::blank(at(day(2026, 9, 7), 9), at(day(2026, 9, 7), 10));
+        series.summary = "Standup".to_string();
+        series.rrule = Some("FREQ=WEEKLY".to_string());
+        series.organizer = Some("boss@x".to_string());
+        series.attendees = vec!["me@x".to_string()];
+        let mut occurrence = series.clone();
+        occurrence.start = at(day(2026, 9, 14), 9);
+        occurrence.end = at(day(2026, 9, 14), 10);
+        let master = Item { id: "e1".into(), calendar_id: "c".into(), instance: None, event: series };
+        let this_week = Item {
+            id: "e1".into(),
+            calendar_id: "c".into(),
+            instance: Some("20260914T090000Z".into()),
+            event: occurrence,
+        };
+        (master, this_week)
+    }
+
+    /// Editing what Thunderbird expanded would write the 14th over the series' own 7th.
+    #[test]
+    fn opening_an_occurrence_edits_the_series_it_belongs_to() {
+        let (master, occurrence) = standup();
+        let mut calendar = Calendar::new();
+        let mut shell = shell();
+        let now = Instant::now();
+        calendar.items = vec![occurrence];
+        let _ = calendar.update(Message::Open("e1".into()), &mut shell, now);
+        assert!(calendar.editor.is_none(), "the series is being fetched; the occurrence is not edited as itself");
+        let _ = calendar.update(Message::Master(Ok(Box::new(master))), &mut shell, now);
+        let editor = calendar.editor.as_ref().expect("the series opened");
+        assert!(editor.series());
+        assert_eq!(editor.start_date, "2026-09-07", "the series' own start, not the occurrence's");
+        assert_eq!(editor.title, "Standup");
+    }
+
+    #[test]
+    fn an_event_that_does_not_recur_opens_at_once() {
+        let (mut master, _) = standup();
+        master.event.rrule = None;
+        let mut calendar = Calendar::new();
+        let mut shell = shell();
+        calendar.items = vec![master];
+        let _ = calendar.update(Message::Open("e1".into()), &mut shell, Instant::now());
+        let editor = calendar.editor.as_ref().expect("opened");
+        assert!(!editor.series());
+    }
+
+    /// The form is text; what it does not show goes back out as it came in.
+    #[test]
+    fn composing_keeps_what_the_form_does_not_show_and_applies_what_it_does() {
+        let (master, _) = standup();
+        let mut editor = Editor::from_item(&master);
+        editor.title = "Standup (moved)".to_string();
+        editor.start_time = "09:30".to_string();
+        editor.end_time = "10:30".to_string();
+        let event = editor.compose().expect("a valid form");
+        assert_eq!(event.summary, "Standup (moved)");
+        assert_eq!(event.uid, master.event.uid);
+        assert_eq!(event.organizer.as_deref(), Some("boss@x"));
+        assert_eq!(event.attendees, ["me@x"]);
+        assert_eq!(event.rrule.as_deref(), Some("FREQ=WEEKLY"), "a rule the form did not touch survives");
+        assert_eq!(event.start.instant().format("%H:%M").to_string(), "09:30");
+    }
+
+    #[test]
+    fn composing_names_the_one_thing_wrong_with_the_form() {
+        let mut editor = Editor::blank("c".into(), day(2026, 9, 14), Some(9));
+        assert_eq!(editor.compose(), Err("Give the event a title"));
+        editor.title = "x".to_string();
+        editor.end_time = "ten".to_string();
+        assert_eq!(editor.compose(), Err("End time should look like 10:00"));
+        editor.end_time = "08:00".to_string();
+        assert_eq!(editor.compose(), Err("End has to be after start"));
+        editor.all_day = true;
+        let event = editor.compose().expect("an all-day event ignores the times");
+        assert!(event.start.is_all_day());
+        assert_eq!(event.last_day(), day(2026, 9, 14));
+    }
+
+    #[test]
+    fn quick_open_lists_a_recurring_event_once() {
+        let (master, occurrence) = standup();
+        let mut calendar = Calendar::new();
+        calendar.items = vec![master, occurrence];
+        assert_eq!(calendar.quick_items().len(), 1);
     }
 }

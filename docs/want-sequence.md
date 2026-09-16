@@ -65,3 +65,9 @@ What's still true is the umbrella question itself: six shipped plans are the bar
 not proof the bar is cleared. That's a "drive it for a while" verdict, not a code-review one — the
 next honest step is using this as a daily mail client and seeing whether it actually beats
 Mail.app, not assuming a green test suite answers that.
+
+## Since then
+
+| Plan | Depends on | Status |
+|---|---|---|
+| [`one-program-plan.md`](one-program-plan.md) — noctmalia spawns its own Thunderbird, no container | None | Shipped 2026-09-15 |

@@ -81,8 +81,11 @@ mod tests {
     #[test]
     fn a_well_formed_file_round_trips() {
         let path = scratch("good");
-        std::fs::write(&path, "[[template]]\nname = \"define\"\ncommand = [\"dict\", \"{selection}\"]\ncontexts = [\"mail-body\"]\n")
-            .expect("write");
+        std::fs::write(
+            &path,
+            "[[template]]\nname = \"define\"\ncommand = [\"dict\", \"{selection}\"]\ncontexts = [\"mail-body\"]\n",
+        )
+        .expect("write");
         let loaded = load_from(&path);
         assert!(loaded.error.is_none());
         assert_eq!(loaded.config.templates.len(), 1);
@@ -94,7 +97,8 @@ mod tests {
     #[test]
     fn contexts_defaults_to_empty_which_means_everywhere() {
         let path = scratch("no-contexts");
-        std::fs::write(&path, "[[template]]\nname = \"open-in-browser\"\ncommand = [\"xdg-open\", \"{selection}\"]\n").expect("write");
+        std::fs::write(&path, "[[template]]\nname = \"open-in-browser\"\ncommand = [\"xdg-open\", \"{selection}\"]\n")
+            .expect("write");
         let loaded = load_from(&path);
         assert!(loaded.config.templates[0].contexts.is_empty());
     }

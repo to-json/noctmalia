@@ -1,23 +1,27 @@
 #!/usr/bin/env python3
-"""Write the development fixture into a real Thunderbird profile.
+"""Write the development fixture into the running window's Thunderbird.
 
-Talks to the bridge through the mailnd stub's control socket, beside `bridgectl.py`:
+Talks to the bridge through noctmalia's own control socket (`noctmalia-ctl.py call`), which
+passes raw bridge methods through only when the window was started with `--dev`:
 
-    docker compose exec -T mailnd python /tools/seed.py
-    docker compose exec -T mailnd python /tools/seed.py --flood 500
+    just dev            # in one terminal
+    tools/seed.py       # in another; or `just seed`
+    tools/seed.py --flood 500
 
 Idempotent. Address books are matched by name and contacts by FN, so running it twice leaves one
-of each; --reset deletes the fixture's own contacts first and writes them fresh. Only one client
-can hold the bridge socket at a time, so seed with the stub attached, then bring the UI up against
-the same profile volume (`compose.ui.yaml`) to look at the result.
+of each; --reset deletes the fixture's own contacts first and writes them fresh.
 """
 
 import argparse
+import importlib.util
 import os
 import sys
 
-import bridgectl
 import fixture
+
+_ctl_spec = importlib.util.spec_from_file_location("noctmalia_ctl", os.path.join(os.path.dirname(__file__), "noctmalia-ctl.py"))
+noctmalia_ctl = importlib.util.module_from_spec(_ctl_spec)
+_ctl_spec.loader.exec_module(noctmalia_ctl)
 
 
 class BridgeError(RuntimeError):
@@ -25,10 +29,11 @@ class BridgeError(RuntimeError):
 
 
 def call(method, params=None, timeout=60):
-    reply = bridgectl.request({"op": "call", "method": method, "params": params or {}, "timeout": timeout})
-    if "error" in reply:
-        error = reply["error"]
-        raise BridgeError(f"{method}: {error.get('name', 'Error')}: {error.get('message', '')}")
+    del timeout  # the bridge's own call timeout applies
+    reply = noctmalia_ctl.request("call", {"method": method, "params": params or {}})
+    if reply.get("error"):
+        detail = reply.get("result", {}).get("error") if isinstance(reply.get("result"), dict) else None
+        raise BridgeError(f"{method}: {detail or reply['error']}")
     return reply["result"]
 
 
@@ -88,9 +93,7 @@ def seed_accounts():
             if "MethodNotFound" in str(error) or "noctmalia" in str(error):
                 raise BridgeError(
                     f"{error}\n"
-                    "dev.provisionAccount needs the dev pref. Start the stack with\n"
-                    "  TBD_EXTRA_PREFS='user_pref(\"extensions.noctmalia.dev\", true);'\n"
-                    "which tools/seed.sh does for you."
+                    "dev.provisionAccount needs the bridge's dev pref: start the window with `just dev`."
                 ) from None
             raise
         print(f"account {account['name']!r}: created {result.get('accountId')}")
@@ -269,7 +272,7 @@ def main():
         print(f"seed: {error}", file=sys.stderr)
         return 1
     except OSError as error:
-        print(f"seed: cannot reach the control socket at {bridgectl.CTL_SOCK}: {error}", file=sys.stderr)
+        print(f"seed: cannot reach the control socket at {noctmalia_ctl.socket_path()}: {error}", file=sys.stderr)
         return 1
     return 0
 

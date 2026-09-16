@@ -100,14 +100,16 @@ pub struct Body {
     pub trackers: usize,
     /// Links whose words claim one destination and whose `href` is another.
     pub misleading: Vec<html::Misleading>,
-    /// The message's HTML alternative, untouched — what "original formatting" mode renders
-    /// instead of `markdown`. Present whenever the message *has* an HTML part anywhere, not only
-    /// when [`pick`] chose to show it: a real plain-text alternative outranks HTML by design (see
-    /// `pick`'s own doc comment), but that is a choice about the *default* view, not a claim that
-    /// the sender's HTML doesn't exist. `trackers`/`images`/`misleading` above are computed from
-    /// whichever text `pick` chose, regardless of mode, so detection doesn't vary by render
+    /// The message's HTML alternative, through [`html::restrict`] — what "original formatting"
+    /// mode lays out instead of `markdown`. Not the bytes as sent: the same allowlist the Markdown
+    /// path reads from, written back as HTML, so the layout engine is handed nothing that names
+    /// a resource or a handler. Present whenever the message *has* an HTML part anywhere, not
+    /// only when [`pick`] chose to show it: a real plain-text alternative outranks HTML by design
+    /// (see `pick`'s own doc comment), but that is a choice about the *default* view, not a claim
+    /// that the sender's HTML doesn't exist. `trackers`/`images`/`misleading` above are computed
+    /// from whichever text `pick` chose, regardless of mode, so detection doesn't vary by render
     /// choice. See `docs/html-mail-plan.md` Stream 4.1.
-    pub raw_html: Option<String>,
+    pub html: Option<String>,
 }
 
 /// A plain-text part below this length, next to an HTML one, is a placeholder rather than the
@@ -120,14 +122,14 @@ pub fn body(root: &Part) -> Body {
         Some(part) => render(part),
         None => Body::default(),
     };
-    if body.raw_html.is_none() {
-        body.raw_html = find_html(root).and_then(|part| part.body.clone());
+    if body.html.is_none() {
+        body.html = find_html(root).and_then(|part| part.body.as_deref()).map(html::restrict);
     }
     body
 }
 
 /// The first HTML part anywhere in the tree, independent of what [`pick`] chose — see
-/// [`Body::raw_html`]. Walks the same containers `pick` does (so a forward's HTML is found too,
+/// [`Body::html`]. Walks the same containers `pick` does (so a forward's HTML is found too,
 /// consistent with how its Markdown already is), but never picks between alternatives: the first
 /// one encountered is the message's HTML, full stop.
 fn find_html(part: &Part) -> Option<&Part> {
@@ -152,7 +154,7 @@ fn render(part: &Part) -> Body {
                 images: converted.images,
                 trackers: converted.trackers,
                 misleading: converted.misleading,
-                raw_html: Some(text.to_string()),
+                html: Some(html::restrict(text)),
             }
         }
         media => {
@@ -313,7 +315,7 @@ mod tests {
         );
         let body = body(&message);
         assert_eq!(body.flavour, Flavour::Plain, "plain still wins the default view");
-        assert_eq!(body.raw_html.as_deref(), Some("<p>marketing</p>"));
+        assert_eq!(body.html.as_deref(), Some("<p>marketing</p>"));
     }
 
     /// ...unless the plain part is an apology for the HTML one, which is not a letter.

@@ -1,6 +1,6 @@
 //! The bridge from the other end: a fake shim connects, and we check what crosses the socket.
 
-use noctmalia_bridge::{Bridge, Error, Event, MAX_REQUEST_BYTES};
+use noctmalia_bridge::{Bridge, Error, Event, MAX_REQUEST_BYTES, REPLACE_AFTER};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
@@ -238,4 +238,100 @@ async fn a_malformed_line_is_ignored_rather_than_killing_the_session() {
     let request = peer.request().await;
     peer.send(json!({ "id": request["id"], "result": { "pong": 3 } })).await;
     assert_eq!(calling.await.expect("join").expect("result")["pong"], 3);
+}
+
+#[tokio::test]
+async fn a_call_nobody_answers_times_out_here_and_the_connection_survives() {
+    let socket = Socket::new("timeout");
+    let bridge = Bridge::spawn_with_timeout(&socket.0, std::time::Duration::from_millis(200)).expect("spawn");
+    let (mut peer, _events) = attach(&bridge).await;
+
+    let calling = tokio::spawn({
+        let bridge = bridge.clone();
+        async move { bridge.call_raw("gloda.search", json!({})).await }
+    });
+    // The request crosses; nobody answers it.
+    assert_eq!(peer.request().await["method"], "gloda.search");
+    match calling.await.expect("join") {
+        Err(Error::TimedOut { method, after }) => {
+            assert_eq!(method, "gloda.search");
+            assert!(after >= std::time::Duration::from_millis(200));
+        }
+        other => panic!("expected TimedOut, got {other:?}"),
+    }
+    let stats = bridge.stats();
+    assert_eq!((stats.timed_out, stats.failed, stats.in_flight), (1, 1, 0));
+
+    // The peer is still attached, and the next call still works.
+    let calling = tokio::spawn({
+        let bridge = bridge.clone();
+        async move { bridge.call_raw("bridge.ping", json!({})).await }
+    });
+    let request = peer.request().await;
+    peer.send(json!({ "id": request["id"], "result": { "pong": 4 } })).await;
+    assert_eq!(calling.await.expect("join").expect("result")["pong"], 4);
+}
+
+#[tokio::test]
+async fn a_newer_connection_replaces_the_one_being_served() {
+    let socket = Socket::new("replace");
+    let bridge = Bridge::spawn(&socket.0).expect("spawn");
+    let (mut old, mut events) = attach(&bridge).await;
+    assert_eq!(bridge.stats().connection, Some(1));
+
+    // A second shim connects while the first is still up: the first is dropped, not left to serve
+    // the socket while the second sits in the backlog saying "connected". Not at once, though —
+    // a newcomer inside the first seconds is refused, so two shims cannot swap forever.
+    let early = Peer::connect(&bridge).await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(bridge.stats().connection, Some(1), "a newcomer that soon is refused");
+    drop(early);
+    tokio::time::sleep(REPLACE_AFTER).await;
+    let mut new = Peer::connect(&bridge).await;
+    new.send(json!({ "event": "bridge.hello", "data": { "protocol": 1 } })).await;
+    assert!(matches!(events.next().await, Some(Event::Lost)), "the old connection is announced as lost");
+    assert!(matches!(events.next().await, Some(Event::Hello(_))), "the new one says hello");
+    assert_eq!(bridge.stats().connection, Some(2));
+
+    let calling = tokio::spawn({
+        let bridge = bridge.clone();
+        async move { bridge.call_raw("bridge.ping", json!({})).await }
+    });
+    let request = new.request().await;
+    assert_eq!(request["method"], "bridge.ping");
+    new.send(json!({ "id": request["id"], "result": { "pong": 5 } })).await;
+    assert_eq!(calling.await.expect("join").expect("result")["pong"], 5);
+    // The old peer's end is closed.
+    assert!(old.lines.next_line().await.ok().flatten().is_none());
+}
+
+#[tokio::test]
+async fn stats_count_calls_and_remember_the_slowest() {
+    let socket = Socket::new("stats");
+    let bridge = Bridge::spawn(&socket.0).expect("spawn");
+    let (mut peer, _events) = attach(&bridge).await;
+    assert!(bridge.stats().attached_for.is_some());
+
+    for pong in 0..2 {
+        let calling = tokio::spawn({
+            let bridge = bridge.clone();
+            async move { bridge.call_raw("bridge.ping", json!({})).await }
+        });
+        let request = peer.request().await;
+        assert_eq!(bridge.stats().in_flight, 1);
+        peer.send(json!({ "id": request["id"], "result": { "pong": pong } })).await;
+        calling.await.expect("join").expect("result");
+    }
+    let stats = bridge.stats();
+    assert_eq!((stats.calls, stats.failed, stats.in_flight, stats.connections), (2, 0, 0, 1));
+    assert_eq!(stats.last.as_ref().map(|sample| sample.method.as_str()), Some("bridge.ping"));
+    assert!(stats.slowest.is_some());
+
+    drop(peer);
+    let _ = _events;
+    // Give the actor a moment to notice the close.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let stats = bridge.stats();
+    assert_eq!(stats.connection, None);
+    assert!(stats.attached_for.is_none());
 }

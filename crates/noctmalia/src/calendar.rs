@@ -51,11 +51,12 @@ pub struct Item {
 }
 
 impl TryFrom<ItemNode> for Item {
-    type Error = String;
+    type Error = Error;
 
     fn try_from(node: ItemNode) -> Result<Item> {
-        let text = node.item.as_str().ok_or_else(|| format!("item {}: not ICAL text", node.id))?;
-        let event = Event::parse(text).ok_or_else(|| format!("item {}: did not parse as a VEVENT", node.id))?;
+        let text = node.item.as_str().ok_or_else(|| Error::Local(format!("item {}: not ICAL text", node.id)))?;
+        let event =
+            Event::parse(text).ok_or_else(|| Error::Local(format!("item {}: did not parse as a VEVENT", node.id)))?;
         Ok(Item { id: node.id, calendar_id: node.calendar_id, instance: node.instance, event })
     }
 }
@@ -63,25 +64,19 @@ impl TryFrom<ItemNode> for Item {
 /// The same `{id, calendarId, item}` shape a call's own response hands back, but reached instead
 /// through a notify payload — `calendar.items.onAlarm`'s `item` field, in particular.
 pub fn item_from_node(node: Value) -> Result<Item> {
-    let node: ItemNode = serde_json::from_value(node).map_err(|error| error.to_string())?;
+    let node: ItemNode = serde_json::from_value(node).map_err(|error| Error::Local(error.to_string()))?;
     Item::try_from(node)
 }
 
-/// Errors reach the UI as text: iced messages must be `Clone`, and there is nothing to do with a
-/// bridge error but show it.
-pub type Result<T> = std::result::Result<T, String>;
-
-fn failed<T>(result: std::result::Result<T, noctmalia_bridge::Error>) -> Result<T> {
-    result.map_err(|error| error.to_string())
-}
+pub use crate::error::{Error, Result};
 
 pub async fn calendars(bridge: Bridge) -> Result<Vec<Cal>> {
-    failed(bridge.call("calendar.calendars.query", json!({})).await)
+    Ok(bridge.call("calendar.calendars.query", json!({})).await?)
 }
 
 pub async fn set_visible(bridge: Bridge, id: String, visible: bool) -> Result<()> {
     let params = json!({ "calendarId": id, "updateProperties": { "hidden": !visible } });
-    failed(bridge.call_raw("calendar.calendars.update", params).await)?;
+    bridge.call_raw("calendar.calendars.update", params).await?;
     Ok(())
 }
 
@@ -104,11 +99,19 @@ pub async fn items(
         "expand": true,
         "returnFormat": "ical",
     });
-    let nodes: Vec<ItemNode> = failed(bridge.call("calendar.items.query", params).await)?;
+    let nodes: Vec<ItemNode> = bridge.call("calendar.items.query", params).await?;
     // One item Thunderbird could not be made ICAL sense of should not blank the whole range.
     let mut items: Vec<Item> = nodes.into_iter().filter_map(|node| Item::try_from(node).ok()).collect();
     items.sort_by_key(|item| item.event.start.instant());
     Ok(items)
+}
+
+/// One item by id. For a recurring event this is the series itself — its own `DTSTART` and its
+/// `RRULE` — where [`items`] hands back the expanded occurrences.
+pub async fn get(bridge: Bridge, calendar_id: String, id: String) -> Result<Item> {
+    let params = json!({ "calendarId": calendar_id, "id": id, "returnFormat": "ical" });
+    let node: ItemNode = bridge.call("calendar.items.get", params).await?;
+    Item::try_from(node)
 }
 
 pub async fn create(bridge: Bridge, calendar_id: String, event: Event) -> Result<Item> {
@@ -119,19 +122,19 @@ pub async fn create(bridge: Bridge, calendar_id: String, event: Event) -> Result
         "item": event.to_ical(),
         "returnFormat": "ical",
     });
-    let node: ItemNode = failed(bridge.call("calendar.items.create", params).await)?;
+    let node: ItemNode = bridge.call("calendar.items.create", params).await?;
     Item::try_from(node)
 }
 
 pub async fn update(bridge: Bridge, calendar_id: String, id: String, event: Event) -> Result<Item> {
     let params = json!({ "calendarId": calendar_id, "id": id, "format": "ical", "item": event.to_ical(), "returnFormat": "ical" });
-    let node: ItemNode = failed(bridge.call("calendar.items.update", params).await)?;
+    let node: ItemNode = bridge.call("calendar.items.update", params).await?;
     Item::try_from(node)
 }
 
 pub async fn remove(bridge: Bridge, calendar_id: String, id: String) -> Result<()> {
     let params = json!({ "calendarId": calendar_id, "id": id });
-    failed(bridge.call_raw("calendar.items.remove", params).await)?;
+    bridge.call_raw("calendar.items.remove", params).await?;
     Ok(())
 }
 

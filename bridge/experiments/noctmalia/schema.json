@@ -10,6 +10,13 @@
         "parameters": []
       },
       {
+        "name": "quit",
+        "type": "function",
+        "async": true,
+        "description": "Ask Thunderbird to exit cleanly, the way closing its last window would. Returns before it has.",
+        "parameters": []
+      },
+      {
         "name": "checkMail",
         "type": "function",
         "async": true,

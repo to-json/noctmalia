@@ -1,9 +1,9 @@
 //! The window: one process, one bridge, and whichever surface is in front.
 //!
-//! This file is the part that is not mail and not people. It owns the window chrome, the
-//! palette, the bridge connection, the surface switcher, and the keyboard — and then hands each
-//! message to whichever surface it belongs to. Everything with an opinion about what is on screen
-//! lives in [`crate::surfaces`].
+//! This file is the part that is not mail, not people and not calendar. It owns the window
+//! chrome, the palette, the bridge connection, the surface switcher, and the keyboard — and then
+//! hands each message to whichever surface it belongs to, through [`Face`] and nothing else.
+//! Everything with an opinion about what is on screen lives in [`crate::surfaces`].
 //!
 //! # The switcher is in the titlebar
 //!
@@ -23,7 +23,8 @@ use crate::config;
 use crate::control;
 use crate::palette;
 use crate::shell::Shell;
-use crate::surfaces::{Pressed, Surface, calendar, mail, people};
+use crate::surfaces::{Face, Pressed, Surface, calendar, mail, people};
+use crate::thunderbird::{self, Report, Supervisor};
 use crate::ui;
 use iced::keyboard::{self, Key, Modifiers, key::Named};
 use iced::widget::operation;
@@ -72,6 +73,10 @@ pub enum Message {
     TemplateRan(Result<String, String>),
     /// A name the control socket accepted as a `run` request — `docs/scripting-socket-plan.md`.
     ControlRun(String),
+    /// What the Thunderbird this process runs is doing — `crate::thunderbird`.
+    Backend(Report),
+    /// SIGTERM or SIGINT: close the window, which is what takes Thunderbird down with it.
+    Quit,
     People(people::Message),
     Mail(mail::Message),
     Calendar(calendar::Message),
@@ -99,13 +104,34 @@ struct Overlay {
     all: Vec<Command<Message>>,
 }
 
+/// Where the Thunderbird on the other end of the bridge comes from.
+#[derive(Clone)]
+pub enum Backend {
+    /// Something else attaches to the socket: `tools/fake-bridge.py`, a test, a Thunderbird
+    /// somebody runs by hand.
+    External,
+    /// This process's own, fetched, spawned and stopped by [`Supervisor`].
+    Managed(Supervisor),
+}
+
+/// What the window shows until the surfaces can: `docs/one-program-plan.md` Stream 2.1.
+#[derive(Debug, Clone, PartialEq)]
+enum Startup {
+    Starting,
+    Fetching { received: u64, total: u64 },
+    Ready,
+    Failed { reason: String, log: std::path::PathBuf },
+}
+
 pub struct App {
     chrome: chrome::Chrome,
     shell: Shell,
+    backend: Backend,
+    startup: Startup,
     surface: Surface,
-    people: people::People,
-    mail: mail::Mail,
-    calendar: calendar::Calendar,
+    mail: Lift<mail::Mail>,
+    people: Lift<people::People>,
+    calendar: Lift<calendar::Calendar>,
     overlay: Option<Overlay>,
     global_pending: keymap::Pending,
     /// `docs/config-plan.md`. Read once at startup — nothing in the app changes it, and a change
@@ -166,28 +192,43 @@ impl Frames {
 }
 
 impl App {
-    pub fn new(bridge: Bridge) -> App {
+    pub fn new(bridge: Bridge, backend: Backend, dev: bool) -> App {
         let mut shell = Shell::new(bridge, WINDOW.width);
         let loaded = config::load();
         if let Some(error) = loaded.error {
             shell.fail(format!("config: {error}"), Instant::now());
         }
-        let people = people::People::new();
-        let mail = mail::Mail::new();
-        let calendar = calendar::Calendar::new();
+        let mail = Lift::new(mail::Mail::new(), Message::Mail);
+        let people = Lift::new(people::People::new(), Message::People);
+        let calendar = Lift::new(calendar::Calendar::new(), Message::Calendar);
 
         // Computed now, before anything has loaded from the bridge, which is exactly what keeps
         // this to state-independent commands: a fresh surface has no folders to build
         // `Message::OpenFolder(id)` from, so nothing that needs one is in the registry at all.
-        let registry = socket_registry(&mail, &people, &calendar);
+        let registry = socket_registry([&mail as &dyn Lifted, &people, &calendar]);
         let (run_tx, run_rx) = mpsc::unbounded_channel();
-        if let Err(error) = control::spawn(registry, run_tx) {
+        let status = {
+            let bridge = shell.bridge();
+            let supervisor = match &backend {
+                Backend::Managed(supervisor) => Some(supervisor.clone()),
+                Backend::External => None,
+            };
+            Arc::new(move || {
+                let mut status = bridge_status(&bridge);
+                status["thunderbird"] = supervisor.as_ref().map_or(serde_json::Value::Null, |s| s.status().json());
+                status
+            }) as control::Status
+        };
+        let raw = dev.then(|| shell.bridge());
+        if let Err(error) = control::spawn(registry, run_tx, status, raw) {
             eprintln!("noctmalia: control socket: {error}");
         }
 
         App {
             chrome: chrome::initial(),
             shell,
+            backend,
+            startup: Startup::Starting,
             surface: Surface::Mail,
             people,
             mail,
@@ -217,14 +258,16 @@ impl App {
             Subscription::run_with(Feed(self.shell.bridge()), feed),
             Subscription::run(palette_changes),
             Subscription::run_with(ControlFeed(Arc::clone(&self.control)), control_feed),
+            Subscription::run(sigterm),
+            Subscription::run(sigint),
         ];
+        if let Backend::Managed(supervisor) = &self.backend {
+            subscriptions.push(Subscription::run_with(Reports(supervisor.clone()), reports));
+        }
         // iced re-reads the subscriptions after every message, so starting an animation in
         // `update` turns this on for exactly as long as it runs.
         let now = Instant::now();
-        let animating = self.shell.animating(now)
-            || self.people.animating(now)
-            || self.mail.animating(now)
-            || self.calendar.animating(now);
+        let animating = self.shell.animating(now) || self.faces().iter().any(|face| face.animating(now));
         if animating || self.frames.as_ref().is_some_and(|frames| frames.drive) {
             subscriptions.push(iced::window::frames().map(|_| Message::Frame));
         }
@@ -247,6 +290,7 @@ impl App {
                     eprintln!("noctmalia: Thunderbird attached");
                 }
                 self.shell.set_connected(true);
+                self.startup = Startup::Ready;
                 self.shell.hush(now);
                 return self.resync();
             }
@@ -255,14 +299,22 @@ impl App {
                     eprintln!("noctmalia: Thunderbird went away");
                 }
                 self.shell.set_connected(false);
+                if self.startup == Startup::Ready {
+                    self.startup = Startup::Starting;
+                }
             }
+            Message::Backend(report) => {
+                self.startup = match report {
+                    Report::Fetching { received, total } => Startup::Fetching { received, total },
+                    Report::Starting | Report::Restarting => Startup::Starting,
+                    Report::Failed { reason, log } => Startup::Failed { reason, log },
+                };
+            }
+            Message::Quit => return iced::exit(),
             Message::Bridge(Event::Lagged(_)) => return self.resync(),
             Message::Bridge(Event::Notify { name, data }) => {
-                return Task::batch([
-                    self.people.notify(&name, &self.shell).map(Message::People),
-                    self.mail.notify(&name, &data, &self.shell).map(Message::Mail),
-                    self.calendar.notify(&name, &data, &self.shell).map(Message::Calendar),
-                ]);
+                let (shell, faces) = self.split();
+                return Task::batch(faces.map(|face| face.notify(&name, &data, shell)));
             }
 
             Message::Key(key, modifiers, captured) => return self.press(key, modifiers, captured, now),
@@ -271,7 +323,13 @@ impl App {
             }
             Message::Show(surface) => return self.show(surface, now),
             Message::Dismiss => self.shell.hush(now),
-            Message::Resized(width) => self.shell.set_width(width),
+            Message::Resized(width) => {
+                self.shell.set_width(width);
+                let (shell, faces) = self.split();
+                for face in faces {
+                    face.resized(shell, now);
+                }
+            }
             // A frame the animations asked for, or one NOCTMALIA_FPS=drive asked for. Either way
             // the work is in `view`: arriving here at all is what schedules the redraw.
             Message::Frame => {}
@@ -299,30 +357,62 @@ impl App {
                 self.shell.fail(format!("control: {name:?} is no longer available"), now);
             }
 
-            Message::Mail(mail::Message::ContextMenu(text, context)) => return self.open_context_menu(text, context),
-            Message::People(people::Message::ContextMenu(text, context)) => return self.open_context_menu(text, context),
-            Message::Calendar(calendar::Message::ContextMenu(text, context)) => return self.open_context_menu(text, context),
-
-            Message::People(message) => {
-                return self.people.update(message, &mut self.shell, now).map(Message::People);
-            }
             Message::Mail(message) => {
-                return self.mail.update(message, &mut self.shell, now).map(Message::Mail);
+                let delivered = self.mail.deliver(message, &mut self.shell, now);
+                return self.deliver(delivered);
+            }
+            Message::People(message) => {
+                let delivered = self.people.deliver(message, &mut self.shell, now);
+                return self.deliver(delivered);
             }
             Message::Calendar(message) => {
-                return self.calendar.update(message, &mut self.shell, now).map(Message::Calendar);
+                let delivered = self.calendar.deliver(message, &mut self.shell, now);
+                return self.deliver(delivered);
             }
         }
         Task::none()
     }
 
-    /// Everything again, from nothing. Both surfaces, because either may be one keystroke away.
+    /// What a surface's message came to: a task to run, or a menu to draw over it.
+    fn deliver(&mut self, delivered: Delivered) -> Task<Message> {
+        match delivered {
+            Delivered::ContextMenu(text, context) => self.open_context_menu(text, context),
+            Delivered::Task(task) => task,
+        }
+    }
+
+    /// The surface in front.
+    fn front(&self) -> &dyn Lifted {
+        match self.surface {
+            Surface::Mail => &self.mail,
+            Surface::People => &self.people,
+            Surface::Calendar => &self.calendar,
+        }
+    }
+
+    fn front_mut(&mut self) -> &mut dyn Lifted {
+        match self.surface {
+            Surface::Mail => &mut self.mail,
+            Surface::People => &mut self.people,
+            Surface::Calendar => &mut self.calendar,
+        }
+    }
+
+    /// Every surface, in switcher order.
+    fn faces(&self) -> [&dyn Lifted; 3] {
+        [&self.mail, &self.people, &self.calendar]
+    }
+
+    /// Every surface and the shell, borrowed apart so one can be handed to the others.
+    fn split(&mut self) -> (&Shell, [&mut dyn Lifted; 3]) {
+        (&self.shell, [&mut self.mail, &mut self.people, &mut self.calendar])
+    }
+
+    /// Everything again, from nothing. Every surface, because any of them may be one keystroke
+    /// away.
     fn resync(&mut self) -> Task<Message> {
-        Task::batch([
-            self.mail.resync(&self.shell).map(Message::Mail),
-            self.people.resync(&self.shell).map(Message::People),
-            self.calendar.resync(&self.shell).map(Message::Calendar),
-        ])
+        let (shell, faces) = self.split();
+        Task::batch(faces.map(|face| face.resync(shell)))
     }
 
     fn show(&mut self, surface: Surface, now: Instant) -> Task<Message> {
@@ -333,41 +423,19 @@ impl App {
         self.shell.hush(now);
         // A surface arriving replays its own entrance, so switching looks like arriving somewhere
         // rather than like a redraw.
-        match surface {
-            Surface::Mail => self.mail.entered(now),
-            Surface::People => self.people.entered(now),
-            Surface::Calendar => self.calendar.entered(now),
-        }
+        self.front_mut().entered(now);
         Task::none()
     }
 
     /// Every keybound action worth finding by name, across all three surfaces — the command
     /// palette's full candidate list before a surface prefix narrows it.
     fn all_commands(&self) -> Vec<Command<Message>> {
-        let mut all = Vec::new();
-        all.extend(self.mail.commands().into_iter().map(|entry| Command::from_entry(Surface::Mail, entry.map(Message::Mail))));
-        all.extend(
-            self.people.commands().into_iter().map(|entry| Command::from_entry(Surface::People, entry.map(Message::People))),
-        );
-        all.extend(self.calendar.commands().into_iter().map(|entry| {
-            Command::from_entry(Surface::Calendar, entry.map(Message::Calendar))
-        }));
-        all
+        self.faces().into_iter().flat_map(|face| face.commands()).collect()
     }
 
     /// Every currently loaded row, across all three surfaces — quick-open's full candidate list.
     fn all_quick_items(&self) -> Vec<Command<Message>> {
-        let mut all = Vec::new();
-        all.extend(
-            self.mail.quick_items().into_iter().map(|entry| Command::from_entry(Surface::Mail, entry.map(Message::Mail))),
-        );
-        all.extend(
-            self.people.quick_items().into_iter().map(|entry| Command::from_entry(Surface::People, entry.map(Message::People))),
-        );
-        all.extend(self.calendar.quick_items().into_iter().map(|entry| {
-            Command::from_entry(Surface::Calendar, entry.map(Message::Calendar))
-        }));
-        all
+        self.faces().into_iter().flat_map(|face| face.quick_items()).collect()
     }
 
     /// The message a control-socket `run` request for `name` actually sends, found the same way
@@ -375,13 +443,17 @@ impl App {
     /// registry snapshot from startup, so a command that has since become unavailable is a clean
     /// miss rather than a stale message built from data that no longer exists.
     fn message_for_socket_name(&self, name: &str) -> Option<Message> {
-        self.all_commands().into_iter().find(|command| command.exposed_to_socket && command.label == name).map(|command| command.message)
+        self.all_commands()
+            .into_iter()
+            .find(|command| command.exposed_to_socket && command.label == name)
+            .map(|command| command.message)
     }
 
     /// Opens a picker seeded from `all`, scoped to the current surface — the un-prefixed state
     /// want.md asked for: what the surface in front of you can do, with nothing typed yet.
     fn open_overlay(&mut self, all: Vec<Command<Message>>) -> Task<Message> {
-        let scoped: Vec<Command<Message>> = all.iter().filter(|command| command.surface == self.surface).cloned().collect();
+        let scoped: Vec<Command<Message>> =
+            all.iter().filter(|command| command.surface == self.surface).cloned().collect();
         self.overlay = Some(Overlay { picker: Picker::new(scoped), all });
         operation::focus(picker::query_id())
     }
@@ -417,12 +489,14 @@ impl App {
     /// implemented as a prefix strip before the fuzzy match ever runs, not a mode switch.
     fn rescope_overlay(&mut self, text: String) {
         let Some(overlay) = &mut self.overlay else { return };
-        let scoped_to = Surface::ALL.into_iter().find(|surface| text.starts_with(surface.prefix()) && text[1..].starts_with(' '));
+        let scoped_to =
+            Surface::ALL.into_iter().find(|surface| text.starts_with(surface.prefix()) && text[1..].starts_with(' '));
         let (surface, rest) = match scoped_to {
             Some(surface) => (surface, text[2..].to_string()),
             None => (self.surface, text),
         };
-        let items: Vec<Command<Message>> = overlay.all.iter().filter(|command| command.surface == surface).cloned().collect();
+        let items: Vec<Command<Message>> =
+            overlay.all.iter().filter(|command| command.surface == surface).cloned().collect();
         overlay.picker.set_items(items);
         overlay.picker.set_query(rest);
     }
@@ -436,7 +510,8 @@ impl App {
             Key::Named(Named::ArrowDown) => overlay.picker.move_selection(1, visible),
             Key::Named(Named::ArrowUp) => overlay.picker.move_selection(-1, visible),
             Key::Named(Named::Enter) => {
-                let chosen = overlay.picker.selected(|command| command.label.as_str()).map(|command| command.message.clone());
+                let chosen =
+                    overlay.picker.selected(|command| command.label.as_str()).map(|command| command.message.clone());
                 self.overlay = None;
                 if let Some(message) = chosen {
                     return Task::done(message);
@@ -472,12 +547,7 @@ impl App {
         if captured {
             return Task::none();
         }
-        let pressed = match self.surface {
-            Surface::Mail => wrap(self.mail.press(&key, modifiers), Message::Mail),
-            Surface::People => wrap(self.people.press(&key, modifiers), Message::People),
-            Surface::Calendar => wrap(self.calendar.press(&key, modifiers), Message::Calendar),
-        };
-        match pressed {
+        match self.front_mut().press(&key, modifiers) {
             Pressed::Act(message) => Task::done(message),
             Pressed::Switch(surface) => self.show(surface, now),
             Pressed::Ignored | Pressed::Pending => Task::none(),
@@ -497,14 +567,10 @@ impl App {
         // One reading for the frame, so everything on screen is drawn at the same moment.
         let now = Instant::now();
         let body: Element<Message> = if self.shell.connected() {
-            let surface = match self.surface {
-                Surface::Mail => self.mail.view(&self.shell, now).map(Message::Mail),
-                Surface::People => self.people.view(&self.shell, now).map(Message::People),
-                Surface::Calendar => self.calendar.view(&self.shell, now).map(Message::Calendar),
-            };
+            let surface = self.front().view(&self.shell, now);
             column![container(surface).height(Length::Fill), self.shell.notice(now, Message::Dismiss)].into()
         } else {
-            ui::waiting(self.shell.socket())
+            self.starting()
         };
         let body = match &self.overlay {
             Some(overlay) => picker::view(
@@ -518,6 +584,42 @@ impl App {
             None => body,
         };
         chrome::frame_with(self.chrome, self.surface.title(), self.switcher(), body, Message::Chrome)
+    }
+
+    /// The page before the surfaces: what is happening, said once, and nothing about sockets.
+    fn starting(&self) -> Element<'_, Message> {
+        let managed = matches!(self.backend, Backend::Managed(_));
+        match &self.startup {
+            Startup::Fetching { received, total } => ui::starting(
+                ui::icon::DOWNLOAD,
+                "Getting Thunderbird",
+                format!(
+                    "Downloading Thunderbird {}, {} of {} MB",
+                    thunderbird::VERSION,
+                    received / 1_000_000,
+                    total / 1_000_000
+                ),
+                Some((*received as f32 / (*total).max(1) as f32).clamp(0.0, 1.0)),
+            ),
+            Startup::Failed { reason, log } => ui::starting(
+                ui::icon::ALERT_TRIANGLE,
+                "Thunderbird could not start",
+                format!("{reason}\nThe log is at {}", log.display()),
+                None,
+            ),
+            Startup::Starting | Startup::Ready if managed => ui::starting(
+                ui::icon::PLUG,
+                "Starting Thunderbird",
+                "A moment; it runs in the background.".to_string(),
+                None,
+            ),
+            Startup::Starting | Startup::Ready => ui::starting(
+                ui::icon::PLUG,
+                "Waiting for Thunderbird",
+                format!("Nothing has attached to {} yet.", self.shell.socket()),
+                None,
+            ),
+        }
     }
 
     /// The surfaces you are not in, and whatever is half-typed.
@@ -536,11 +638,7 @@ impl App {
         }
         // A half-typed sequence appears where the thing it is about to change already is. It is the
         // whole of the modal feedback, and it is one line of text.
-        let typed = match self.surface {
-            Surface::Mail => self.mail.typed(),
-            Surface::People => self.people.typed(),
-            Surface::Calendar => self.calendar.typed(),
-        };
+        let typed = self.front().typed();
         if !typed.is_empty() {
             bar = bar.push(
                 container(text(typed).size(theme::FONT_MINI).font(theme::semibold()).color(theme::palette().primary))
@@ -558,12 +656,7 @@ impl App {
         if self.overlay.is_some() {
             return Mode::Overlay;
         }
-        let composing = match self.surface {
-            Surface::Mail => self.mail.composing(),
-            Surface::People => self.people.composing(),
-            Surface::Calendar => self.calendar.composing(),
-        };
-        if composing { Mode::Compose } else { Mode::Browse }
+        if self.front().composing() { Mode::Compose } else { Mode::Browse }
     }
 }
 
@@ -592,14 +685,129 @@ impl Mode {
 /// `exposed_to_socket`, by label. Computed from fresh surfaces before anything has loaded from the
 /// bridge — see the comment where this is called in [`App::new`] for why that is what keeps it to
 /// state-independent commands without naming them twice.
-fn socket_registry(mail: &mail::Mail, people: &people::People, calendar: &calendar::Calendar) -> Vec<control::Exposed> {
-    fn exposed<M>(entries: Vec<crate::commands::Entry<M>>) -> impl Iterator<Item = control::Exposed> {
-        entries
-            .into_iter()
-            .filter(|entry| entry.exposed_to_socket)
-            .map(|entry| control::Exposed { name: entry.label.clone(), label: entry.label })
+fn socket_registry(faces: [&dyn Lifted; 3]) -> Vec<control::Exposed> {
+    faces
+        .into_iter()
+        .flat_map(|face| face.commands())
+        .filter(|command| command.exposed_to_socket)
+        .map(|command| control::Exposed { name: command.label.clone(), label: command.label })
+        .collect()
+}
+
+/// A surface with its messages lifted into the application's, so the one in front can be held as
+/// `&dyn Lifted` and asked the same questions whichever it is. Everything here is [`Face`] with
+/// the surface's own message type mapped away.
+trait Lifted {
+    fn view<'a>(&'a self, shell: &'a Shell, now: Instant) -> Element<'a, Message>;
+    fn press(&mut self, key: &Key, modifiers: Modifiers) -> Pressed<Message>;
+    fn notify(&mut self, name: &str, data: &serde_json::Value, shell: &Shell) -> Task<Message>;
+    fn resync(&mut self, shell: &Shell) -> Task<Message>;
+    fn entered(&mut self, now: Instant);
+    fn resized(&mut self, shell: &Shell, now: Instant);
+    fn animating(&self, now: Instant) -> bool;
+    fn typed(&self) -> String;
+    fn composing(&self) -> bool;
+    fn commands(&self) -> Vec<Command<Message>>;
+    fn quick_items(&self) -> Vec<Command<Message>>;
+}
+
+/// A [`Face`] plus the one thing the application knows and the surface does not: which
+/// [`Message`] variant carries its messages.
+struct Lift<S: Face> {
+    inner: S,
+    lift: fn(S::Message) -> Message,
+}
+
+/// What delivering a surface's own message came to.
+enum Delivered {
+    /// It was a right-click: the application draws the menu, the surface never sees it.
+    ContextMenu(String, &'static str),
+    Task(Task<Message>),
+}
+
+impl<S: Face> Lift<S> {
+    fn new(inner: S, lift: fn(S::Message) -> Message) -> Lift<S> {
+        Lift { inner, lift }
     }
-    exposed(mail.commands()).chain(exposed(people.commands())).chain(exposed(calendar.commands())).collect()
+
+    fn deliver(&mut self, message: S::Message, shell: &mut Shell, now: Instant) -> Delivered {
+        if let Some((text, context)) = S::context_menu(&message) {
+            return Delivered::ContextMenu(text.to_string(), context);
+        }
+        Delivered::Task(self.inner.update(message, shell, now).map(self.lift))
+    }
+}
+
+impl<S: Face> Lifted for Lift<S> {
+    fn view<'a>(&'a self, shell: &'a Shell, now: Instant) -> Element<'a, Message> {
+        self.inner.view(shell, now).map(self.lift)
+    }
+
+    fn press(&mut self, key: &Key, modifiers: Modifiers) -> Pressed<Message> {
+        wrap(self.inner.press(key, modifiers), self.lift)
+    }
+
+    fn notify(&mut self, name: &str, data: &serde_json::Value, shell: &Shell) -> Task<Message> {
+        self.inner.notify(name, data, shell).map(self.lift)
+    }
+
+    fn resync(&mut self, shell: &Shell) -> Task<Message> {
+        self.inner.resync(shell).map(self.lift)
+    }
+
+    fn entered(&mut self, now: Instant) {
+        self.inner.entered(now);
+    }
+
+    fn resized(&mut self, shell: &Shell, now: Instant) {
+        self.inner.resized(shell, now);
+    }
+
+    fn animating(&self, now: Instant) -> bool {
+        self.inner.animating(now)
+    }
+
+    fn typed(&self) -> String {
+        self.inner.typed()
+    }
+
+    fn composing(&self) -> bool {
+        self.inner.composing()
+    }
+
+    fn commands(&self) -> Vec<Command<Message>> {
+        self.inner.commands().into_iter().map(|entry| Command::from_entry(S::SURFACE, entry.map(self.lift))).collect()
+    }
+
+    fn quick_items(&self) -> Vec<Command<Message>> {
+        self.inner
+            .quick_items()
+            .into_iter()
+            .map(|entry| Command::from_entry(S::SURFACE, entry.map(self.lift)))
+            .collect()
+    }
+}
+
+/// What the control socket's `status` says: the bridge's own numbers, so "it is stuck" can be
+/// asked from a shell and answered with a connection number, a count of calls in flight, and the
+/// slowest thing that has happened.
+fn bridge_status(bridge: &Bridge) -> serde_json::Value {
+    let stats = bridge.stats();
+    let sample = |sample: Option<noctmalia_bridge::Sample>| {
+        sample.map(|sample| serde_json::json!({ "method": sample.method, "millis": sample.took.as_millis() as u64 }))
+    };
+    serde_json::json!({
+        "socket": bridge.path().display().to_string(),
+        "connection": stats.connection,
+        "connections": stats.connections,
+        "attached_seconds": stats.attached_for.map(|for_| for_.as_secs()),
+        "in_flight": stats.in_flight,
+        "calls": stats.calls,
+        "failed": stats.failed,
+        "timed_out": stats.timed_out,
+        "slowest": sample(stats.slowest),
+        "last": sample(stats.last),
+    })
 }
 
 /// A hung script cannot be allowed to freeze the UI waiting on it — `docs/context-commands-plan.md`
@@ -648,7 +856,8 @@ fn overlay_row<'a>(command: &Command<Message>, selected: bool) -> Element<'a, Me
         Some(hint) => text(hint).size(theme::FONT_MINI).color(theme::palette().on_surface_variant).into(),
         None => space().into(),
     };
-    let glyph = noctalia_iced::widgets::icon(command.surface.glyph(), theme::FONT_CAPTION).color(theme::palette().on_surface_variant);
+    let glyph = noctalia_iced::widgets::icon(command.surface.glyph(), theme::FONT_CAPTION)
+        .color(theme::palette().on_surface_variant);
     container(
         row![glyph, text(command.label.clone()).size(theme::FONT_BODY), space().width(Length::Fill), hint]
             .spacing(theme::SPACE_SM)
@@ -731,6 +940,49 @@ fn control_feed(feed: &ControlFeed) -> impl iced::futures::Stream<Item = Message
     })
 }
 
+/// What the supervisor reports, as messages. Keyed on a constant: there is one supervisor.
+struct Reports(Supervisor);
+
+impl Hash for Reports {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        "thunderbird".hash(state);
+    }
+}
+
+fn reports(feed: &Reports) -> impl iced::futures::Stream<Item = Message> + use<> {
+    let receiver = feed.0.reports();
+    iced::futures::stream::unfold(receiver, |mut receiver| async move {
+        loop {
+            match receiver.recv().await {
+                Ok(report) => return Some((Message::Backend(report), receiver)),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    })
+}
+
+/// SIGTERM, which is what a session ending or a `kill` sends: close the window, and the
+/// Thunderbird goes with it, cleanly, in `main` after the runtime returns.
+fn sigterm() -> impl iced::futures::Stream<Item = Message> {
+    signal_stream(tokio::signal::unix::SignalKind::terminate())
+}
+
+fn sigint() -> impl iced::futures::Stream<Item = Message> {
+    signal_stream(tokio::signal::unix::SignalKind::interrupt())
+}
+
+fn signal_stream(kind: tokio::signal::unix::SignalKind) -> impl iced::futures::Stream<Item = Message> {
+    iced::futures::stream::unfold(None, move |signal| async move {
+        let mut signal = match signal {
+            Some(signal) => signal,
+            None => tokio::signal::unix::signal(kind).ok()?,
+        };
+        signal.recv().await?;
+        Some((Message::Quit, Some(signal)))
+    })
+}
+
 /// Palette changes from the Noctalia shell. One watcher per process: the subscription has no input
 /// to key on, so iced keeps a single instance of it alive for the life of the application.
 fn palette_changes() -> impl iced::futures::Stream<Item = Message> {
@@ -785,12 +1037,12 @@ mod tests {
     /// fix. Calendar gets its own natural letter; People gets `p`.
     #[test]
     fn g_c_goes_to_calendar_and_g_p_goes_to_people() {
-        let mut app = App::new(bridge());
+        let mut app = App::new(bridge(), Backend::External, false);
         let _ = press(&mut app, Key::Character("g".into()), Modifiers::empty());
         let _ = press(&mut app, Key::Character("c".into()), Modifiers::empty());
         assert_eq!(app.surface, Surface::Calendar);
 
-        let mut app = App::new(bridge());
+        let mut app = App::new(bridge(), Backend::External, false);
         let _ = press(&mut app, Key::Character("g".into()), Modifiers::empty());
         let _ = press(&mut app, Key::Character("p".into()), Modifiers::empty());
         assert_eq!(app.surface, Surface::People);
@@ -798,7 +1050,7 @@ mod tests {
 
     #[test]
     fn ctrl_k_opens_the_palette_scoped_to_the_current_surface() {
-        let mut app = App::new(bridge());
+        let mut app = App::new(bridge(), Backend::External, false);
         assert_eq!(app.surface, Surface::Mail);
         let _ = press(&mut app, Key::Character("k".into()), Modifiers::CTRL);
         let overlay = app.overlay.as_ref().expect("ctrl+k opens the palette");
@@ -809,7 +1061,7 @@ mod tests {
 
     #[test]
     fn ctrl_p_opens_quick_open_over_currently_loaded_rows_not_commands() {
-        let mut app = App::new(bridge());
+        let mut app = App::new(bridge(), Backend::External, false);
         let _ = press(&mut app, Key::Character("p".into()), Modifiers::CTRL);
         let overlay = app.overlay.as_ref().expect("ctrl+p opens quick-open");
         // Nothing has loaded yet in a freshly-built app, so there is nothing to jump to — the
@@ -820,7 +1072,7 @@ mod tests {
 
     #[test]
     fn escape_closes_the_palette_without_running_anything() {
-        let mut app = App::new(bridge());
+        let mut app = App::new(bridge(), Backend::External, false);
         let all = app.all_commands();
         assert!(!all.is_empty(), "mail has commands to show");
         let _ = app.open_overlay(all);
@@ -830,7 +1082,7 @@ mod tests {
 
     #[test]
     fn a_surface_prefix_rescopes_the_candidate_list_and_eats_itself_from_the_query() {
-        let mut app = App::new(bridge());
+        let mut app = App::new(bridge(), Backend::External, false);
         let all = app.all_commands();
         let _ = app.open_overlay(all);
         app.rescope_overlay("p archive".to_string());
@@ -843,7 +1095,7 @@ mod tests {
 
     #[test]
     fn the_c_prefix_scopes_to_calendar_not_people() {
-        let mut app = App::new(bridge());
+        let mut app = App::new(bridge(), Backend::External, false);
         let all = app.all_commands();
         let _ = app.open_overlay(all);
         app.rescope_overlay("c today".to_string());
@@ -856,7 +1108,7 @@ mod tests {
 
     #[test]
     fn a_bare_query_with_no_prefix_stays_scoped_to_the_current_surface() {
-        let mut app = App::new(bridge());
+        let mut app = App::new(bridge(), Backend::External, false);
         let all = app.all_commands();
         let _ = app.open_overlay(all);
         app.rescope_overlay("archive".to_string());
@@ -869,7 +1121,7 @@ mod tests {
 
     #[test]
     fn arrow_keys_move_the_selection_and_enter_closes_the_palette() {
-        let mut app = App::new(bridge());
+        let mut app = App::new(bridge(), Backend::External, false);
         let all = app.all_commands();
         let _ = app.open_overlay(all);
         let before = app.overlay.as_ref().unwrap().picker.selected(|command| command.label.as_str()).cloned();
@@ -885,14 +1137,14 @@ mod tests {
 
     #[test]
     fn browse_shows_no_mode_badge() {
-        let app = App::new(bridge());
+        let app = App::new(bridge(), Backend::External, false);
         assert_eq!(app.mode(), Mode::Browse);
         assert!(!texts(&app).iter().any(|text| text == "Compose" || text == "Command"));
     }
 
     #[test]
     fn opening_the_palette_shows_the_command_badge() {
-        let mut app = App::new(bridge());
+        let mut app = App::new(bridge(), Backend::External, false);
         let all = app.all_commands();
         let _ = app.open_overlay(all);
         assert_eq!(app.mode(), Mode::Overlay);
@@ -910,23 +1162,23 @@ mod tests {
 
     #[test]
     fn composing_shows_the_compose_badge_and_closing_returns_to_browse() {
-        let mut app = App::new(bridge());
-        let _ = app.mail.update(mail::Message::Identities(Ok(vec![identity()])), &mut app.shell, Instant::now());
-        let _ = app.mail.update(mail::Message::Compose(None), &mut app.shell, Instant::now());
+        let mut app = App::new(bridge(), Backend::External, false);
+        let _ = app.mail.inner.update(mail::Message::Identities(Ok(vec![identity()])), &mut app.shell, Instant::now());
+        let _ = app.mail.inner.update(mail::Message::Compose(None), &mut app.shell, Instant::now());
         assert_eq!(app.mode(), Mode::Compose);
         assert!(texts(&app).iter().any(|text| text == "Compose"));
 
-        let _ = app.mail.update(mail::Message::Escape, &mut app.shell, Instant::now());
+        let _ = app.mail.inner.update(mail::Message::Escape, &mut app.shell, Instant::now());
         assert_eq!(app.mode(), Mode::Browse);
         assert!(!texts(&app).iter().any(|text| text == "Compose"));
     }
 
     #[test]
     fn a_palette_open_over_a_draft_shows_the_overlay_badge_not_the_compose_one() {
-        let mut app = App::new(bridge());
-        let _ = app.mail.update(mail::Message::Identities(Ok(vec![identity()])), &mut app.shell, Instant::now());
-        let _ = app.mail.update(mail::Message::Compose(None), &mut app.shell, Instant::now());
-        assert!(app.mail.composing(), "the draft actually needs to be open for this test to mean anything");
+        let mut app = App::new(bridge(), Backend::External, false);
+        let _ = app.mail.inner.update(mail::Message::Identities(Ok(vec![identity()])), &mut app.shell, Instant::now());
+        let _ = app.mail.inner.update(mail::Message::Compose(None), &mut app.shell, Instant::now());
+        assert!(app.mail.inner.composing(), "the draft actually needs to be open for this test to mean anything");
         let all = app.all_commands();
         let _ = app.open_overlay(all);
         assert_eq!(app.mode(), Mode::Overlay, "what's on top wins over what it's covering");
@@ -938,7 +1190,7 @@ mod tests {
     /// scrollable built from a scored list are all real layout code with room to panic in.
     #[test]
     fn the_palette_lays_out_over_the_window_without_panicking() {
-        let mut app = App::new(bridge());
+        let mut app = App::new(bridge(), Backend::External, false);
         let all = app.all_commands();
         let _ = app.open_overlay(all);
         let element = app.view().map(|_| ());
@@ -953,7 +1205,7 @@ mod tests {
     #[ignore = "writes a PNG rather than asserting"]
     fn shot_of_the_palette_open() {
         use iced::{Settings, Size};
-        let mut app = App::new(bridge());
+        let mut app = App::new(bridge(), Backend::External, false);
         let all = app.all_commands();
         let _ = app.open_overlay(all);
         let element = app.view().map(|_| ());
@@ -964,8 +1216,8 @@ mod tests {
         };
         let mut simulator = iced_test::Simulator::with_size(settings, Size::new(1180.0, 720.0), element);
         let snapshot = simulator.snapshot(&Theme::Dark).expect("it draws");
-        let directory =
-            std::env::var("NOCTMALIA_SHOTS").unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/shots").to_string());
+        let directory = std::env::var("NOCTMALIA_SHOTS")
+            .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/shots").to_string());
         std::fs::create_dir_all(&directory).expect("somewhere to write to");
         let path = std::path::Path::new(&directory).join("palette-open.png");
         let _ = std::fs::remove_file(&path);
@@ -978,9 +1230,13 @@ mod tests {
     #[ignore = "writes a PNG rather than asserting"]
     fn shot_of_a_context_menu_open() {
         use iced::{Settings, Size};
-        let mut app = App::new(bridge());
+        let mut app = App::new(bridge(), Backend::External, false);
         app.config.templates = vec![
-            config::Template { name: "Look up".to_string(), command: vec!["dict".to_string(), "{selection}".to_string()], contexts: vec![] },
+            config::Template {
+                name: "Look up".to_string(),
+                command: vec!["dict".to_string(), "{selection}".to_string()],
+                contexts: vec![],
+            },
             config::Template {
                 name: "Open in browser".to_string(),
                 command: vec!["xdg-open".to_string(), "{selection}".to_string()],
@@ -989,12 +1245,15 @@ mod tests {
         ];
         let _ = app.open_context_menu("the highlighted text".to_string(), "mail-body");
         let element = app.view().map(|_| ());
-        let settings =
-            Settings { default_font: crate::font::ui(), fonts: vec![noctalia_iced::theme::ICON_FONT_BYTES.into()], ..Settings::default() };
+        let settings = Settings {
+            default_font: crate::font::ui(),
+            fonts: vec![noctalia_iced::theme::ICON_FONT_BYTES.into()],
+            ..Settings::default()
+        };
         let mut simulator = iced_test::Simulator::with_size(settings, Size::new(1180.0, 720.0), element);
         let snapshot = simulator.snapshot(&Theme::Dark).expect("it draws");
-        let directory =
-            std::env::var("NOCTMALIA_SHOTS").unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/shots").to_string());
+        let directory = std::env::var("NOCTMALIA_SHOTS")
+            .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/shots").to_string());
         std::fs::create_dir_all(&directory).expect("somewhere to write to");
         let path = std::path::Path::new(&directory).join("context-menu-open.png");
         let _ = std::fs::remove_file(&path);
@@ -1007,21 +1266,55 @@ mod tests {
     #[ignore = "writes a PNG rather than asserting"]
     fn shot_of_the_compose_badge() {
         use iced::{Settings, Size};
-        let mut app = App::new(bridge());
-        let _ = app.mail.update(mail::Message::Identities(Ok(vec![identity()])), &mut app.shell, Instant::now());
-        let _ = app.mail.update(mail::Message::Compose(None), &mut app.shell, Instant::now());
+        let mut app = App::new(bridge(), Backend::External, false);
+        let _ = app.mail.inner.update(mail::Message::Identities(Ok(vec![identity()])), &mut app.shell, Instant::now());
+        let _ = app.mail.inner.update(mail::Message::Compose(None), &mut app.shell, Instant::now());
         let element = app.view().map(|_| ());
-        let settings =
-            Settings { default_font: crate::font::ui(), fonts: vec![noctalia_iced::theme::ICON_FONT_BYTES.into()], ..Settings::default() };
+        let settings = Settings {
+            default_font: crate::font::ui(),
+            fonts: vec![noctalia_iced::theme::ICON_FONT_BYTES.into()],
+            ..Settings::default()
+        };
         let mut simulator = iced_test::Simulator::with_size(settings, Size::new(1180.0, 720.0), element);
         let snapshot = simulator.snapshot(&Theme::Dark).expect("it draws");
-        let directory =
-            std::env::var("NOCTMALIA_SHOTS").unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/shots").to_string());
+        let directory = std::env::var("NOCTMALIA_SHOTS")
+            .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/shots").to_string());
         std::fs::create_dir_all(&directory).expect("somewhere to write to");
         let path = std::path::Path::new(&directory).join("compose-badge.png");
         let _ = std::fs::remove_file(&path);
         assert!(snapshot.matches_image(&path).expect("write the png"));
         eprintln!("wrote {}", path.display());
+    }
+
+    // ── Startup states: docs/one-program-plan.md Stream 2.1 ────────────────────────────
+
+    #[test]
+    fn an_external_backend_says_it_is_waiting_and_names_nothing_about_sockets_when_managed() {
+        let app = App::new(bridge(), Backend::External, false);
+        assert!(texts(&app).iter().any(|text| text == "Waiting for Thunderbird"));
+    }
+
+    #[test]
+    fn a_fetch_in_progress_is_a_sentence_and_a_bar() {
+        let mut app = App::new(bridge(), Backend::External, false);
+        let _ = app.update(Message::Backend(Report::Fetching { received: 43_000_000, total: 86_000_000 }));
+        assert!(texts(&app).iter().any(|text| text == "Getting Thunderbird"));
+        assert!(texts(&app).iter().any(|text| text.contains("43 of 86 MB")));
+    }
+
+    #[test]
+    fn a_failure_names_the_reason_and_the_log() {
+        let mut app = App::new(bridge(), Backend::External, false);
+        let log = std::path::PathBuf::from("/tmp/somewhere/thunderbird.log");
+        let _ = app.update(Message::Backend(Report::Failed { reason: "systemd-run exited with 1".into(), log }));
+        let words = texts(&app);
+        assert!(words.iter().any(|text| text == "Thunderbird could not start"));
+        assert!(
+            words
+                .iter()
+                .any(|text| text.contains("systemd-run exited with 1")
+                    && text.contains("/tmp/somewhere/thunderbird.log"))
+        );
     }
 
     // ── Context commands: docs/context-commands-plan.md §3 ──────────────────────────────
@@ -1080,7 +1373,7 @@ mod tests {
 
     #[test]
     fn a_context_menu_is_built_only_from_templates_that_match_or_name_no_context() {
-        let mut app = App::new(bridge());
+        let mut app = App::new(bridge(), Backend::External, false);
         app.config.templates = vec![
             config::Template { name: "Everywhere".to_string(), command: vec!["true".to_string()], contexts: vec![] },
             config::Template {
@@ -1104,9 +1397,12 @@ mod tests {
 
     #[test]
     fn a_context_with_no_matching_templates_opens_no_menu() {
-        let mut app = App::new(bridge());
-        app.config.templates =
-            vec![config::Template { name: "People only".to_string(), command: vec!["true".to_string()], contexts: vec!["person-field".to_string()] }];
+        let mut app = App::new(bridge(), Backend::External, false);
+        app.config.templates = vec![config::Template {
+            name: "People only".to_string(),
+            command: vec!["true".to_string()],
+            contexts: vec!["person-field".to_string()],
+        }];
         let _ = app.open_context_menu("some text".to_string(), "mail-body");
         assert!(app.overlay.is_none());
     }

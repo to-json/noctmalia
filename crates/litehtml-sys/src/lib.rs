@@ -131,9 +131,12 @@ pub fn render_with_measure(
     render_with(html, viewport_w, viewport_h, Some(trampoline), ctx)
 }
 
+/// A NUL byte in `html` — which a C string cannot carry, and which hostile mail can — is dropped
+/// rather than refused: the caller is a reader, not a validator.
+///
 /// # Panics
-/// If `html` contains a NUL byte, or if the shim reports a primitive kind this crate doesn't know
-/// about (would mean `shim.cpp` and `lib.rs` have drifted — a bug here, not a caller error).
+/// If the shim reports a primitive kind this crate doesn't know about (would mean `shim.cpp` and
+/// `lib.rs` have drifted — a bug here, not a caller error).
 fn render_with(
     html: &str,
     viewport_w: i32,
@@ -141,7 +144,10 @@ fn render_with(
     measure: Option<MeasureFn>,
     measure_ctx: *mut c_void,
 ) -> Option<Rendered> {
-    let c_html = CString::new(html).expect("HTML mail body must not contain NUL bytes");
+    let c_html = match CString::new(html) {
+        Ok(c_html) => c_html,
+        Err(_) => CString::new(html.replace('\0', "")).expect("every NUL was just removed"),
+    };
 
     // First pass: ask for nothing, just learn the true counts, then allocate exactly once. A
     // render pass is re-run rather than cached because litehtml doesn't expose a "how many
@@ -273,6 +279,13 @@ mod tests {
             narrow_positions, wrapped_positions,
             "an enormous measured width should lay these words out differently than the built-in guess"
         );
+    }
+
+    #[test]
+    fn a_nul_byte_in_the_document_is_dropped_rather_than_a_panic() {
+        let rendered = render("<html><body><p>be\0fore</p></body></html>", 400, 600).expect("still a document");
+        let text: String = rendered.primitives.iter().filter(|p| p.kind == Kind::Text).map(|p| p.text.as_str()).collect();
+        assert!(text.contains("before"), "{text:?}");
     }
 
     #[test]

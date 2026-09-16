@@ -7,6 +7,7 @@
 //! its layout, borrows the bridge to make a call, and calls [`Shell::announce`] or [`Shell::fail`]
 //! rather than growing a banner of its own.
 
+use crate::error::Error;
 use crate::ui;
 use iced::widget::{button, container, row, space, text};
 use iced::{Alignment, Animation, Border, Element, Length, Padding};
@@ -70,6 +71,29 @@ impl Shell {
     pub fn fail(&mut self, text: impl Into<String>, now: Instant) {
         self.notice = Some(Notice { text: text.into(), bad: true });
         self.open.go_mut(true, now);
+    }
+
+    /// A call over the bridge failed. Thunderbird not being there is not news — the window is
+    /// already showing the waiting page, and the resync its next hello triggers redoes the call —
+    /// so that case says nothing; everything else is a failure worth a banner.
+    pub fn report(&mut self, error: &Error, now: Instant) {
+        if error.is_disconnected() {
+            return;
+        }
+        self.fail(error.to_string(), now);
+    }
+
+    /// [`report`](Shell::report), with what was being attempted in front of the reason.
+    pub fn report_in(&mut self, what: &str, error: &Error, now: Instant) {
+        if error.is_disconnected() {
+            return;
+        }
+        self.fail(format!("{what}: {error}"), now);
+    }
+
+    /// What the banner is saying, whether or not it is still open.
+    pub fn saying(&self) -> Option<&str> {
+        self.notice.as_ref().map(|notice| notice.text.as_str())
     }
 
     pub fn hush(&mut self, now: Instant) {

@@ -46,16 +46,10 @@ impl From<ContactNode> for Contact {
     }
 }
 
-/// Errors reach the UI as text: iced messages must be `Clone`, and there is nothing to do with a
-/// bridge error but show it.
-pub type Result<T> = std::result::Result<T, String>;
-
-fn failed<T>(result: std::result::Result<T, noctmalia_bridge::Error>) -> Result<T> {
-    result.map_err(|error| error.to_string())
-}
+pub use crate::error::{Error, Result};
 
 pub async fn books(bridge: Bridge) -> Result<Vec<AddressBook>> {
-    failed(bridge.call("addressBooks.list", json!({ "complete": false })).await)
+    Ok(bridge.call("addressBooks.list", json!({ "complete": false })).await?)
 }
 
 /// Every contact in `book`, or across all books when it is `None`.
@@ -69,7 +63,7 @@ pub async fn list(bridge: Bridge, book: Option<String>, books: Vec<AddressBook>)
     };
     let mut contacts = Vec::new();
     for id in wanted {
-        let nodes: Vec<ContactNode> = failed(bridge.call("contacts.list", json!({ "parentId": id })).await)?;
+        let nodes: Vec<ContactNode> = bridge.call("contacts.list", json!({ "parentId": id })).await?;
         contacts.extend(nodes.into_iter().map(Contact::from));
     }
     Ok(sorted(contacts))
@@ -81,21 +75,21 @@ pub async fn search(bridge: Bridge, query: String, book: Option<String>) -> Resu
         Some(id) => json!({ "parentId": id, "searchString": query }),
         None => json!({ "searchString": query }),
     };
-    let nodes: Vec<ContactNode> = failed(bridge.call("contacts.quickSearch", params).await)?;
+    let nodes: Vec<ContactNode> = bridge.call("contacts.quickSearch", params).await?;
     Ok(sorted(nodes.into_iter().map(Contact::from).collect()))
 }
 
 pub async fn create(bridge: Bridge, book: String, vcard: String) -> Result<String> {
-    failed(bridge.call("contacts.create", json!({ "parentId": book, "vCard": vcard })).await)
+    Ok(bridge.call("contacts.create", json!({ "parentId": book, "vCard": vcard })).await?)
 }
 
 pub async fn update(bridge: Bridge, id: String, vcard: String) -> Result<String> {
-    failed(bridge.call_raw("contacts.update", json!({ "contactId": id, "vCard": vcard })).await)?;
+    bridge.call_raw("contacts.update", json!({ "contactId": id, "vCard": vcard })).await?;
     Ok(id)
 }
 
 pub async fn delete(bridge: Bridge, id: String) -> Result<()> {
-    failed(bridge.call_raw("contacts.delete", json!({ "contactId": id })).await)?;
+    bridge.call_raw("contacts.delete", json!({ "contactId": id })).await?;
     Ok(())
 }
 

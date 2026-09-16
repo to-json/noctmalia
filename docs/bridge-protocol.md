@@ -1,6 +1,6 @@
-# tbd
+# The bridge
 
-Thunderbird 155.0.1 running headless as the mail, calendar and contacts backend for noctmalia. The client connects to it through a sideloaded MailExtension, the bridge.
+Thunderbird 155.0.1 running headless as the mail, calendar and contacts backend for noctmalia — spawned and stopped by noctmalia itself since 2026-09-15 (`docs/one-program-plan.md`; `crates/noctmalia/src/thunderbird/`). The client connects to it through a sideloaded MailExtension, the bridge, whose source is `bridge/`.
 
 ```
 thunderbird --headless
@@ -9,26 +9,24 @@ thunderbird --headless
           └ nm-shim  ── NDJSON over unix socket ──►  the client  (/run/noctmalia/bridge.sock)
 ```
 
-- **Thunderbird build.** Mozilla ships Linux builds for x86_64 only, so on arm64 hosts the image runs under emulation. Startup takes about a minute.
+- **Thunderbird build.** Mozilla ships Linux builds for x86_64 only. noctmalia fetches the pinned tarball once; `NOCTMALIA_THUNDERBIRD` names a build you supply instead.
 - **The bridge** maps method names to `messenger.*` calls and forwards events. It keeps no state.
 - **The shim** relays bytes without reading them. It reconnects forever, and Thunderbird restarts it along with the extension.
-- **The client owns the socket:** it listens, the shim connects in. Today that is `noctmalia` itself (`crates/noctmalia-bridge`); `tools/mailnd-stub.py` is the CLI stand-in, and `tools/fake-bridge.py` is the reverse, a Thunderbird stand-in for developing the UI.
+- **The client owns the socket:** it listens, the shim connects in. That is `noctmalia` itself (`crates/noctmalia-bridge`); `tools/fake-bridge.py` is the reverse, a Thunderbird stand-in for developing the UI.
 
 ## Run
 
 ```sh
-docker compose up -d --build              # tbd + the CLI stub
-docker compose exec mailnd python /tools/bridgectl.py status
-docker compose exec mailnd python /tools/bridgectl.py call accounts.list
-tools/seed.sh                             # stack up + the development fixture in the profile
-tools/smoke.sh                            # full end-to-end test against GreenMail (wipes volumes)
+just dev                                        # the window, with the dev methods on
+tools/noctmalia-ctl.py status                   # which connection, calls in flight, Thunderbird's pid and scope
+tools/noctmalia-ctl.py call accounts.list       # any bridge method, straight through
+tools/noctmalia-ctl.py wait messages.onUpdated  # the next such event
+tools/seed.sh                                   # the development fixture into that profile
+tools/smoke.sh                                  # full end-to-end test against GreenMail, from a fresh profile
 ```
 
-`tools/seed.sh` is the one to reach for: it starts the stack with the dev pref on and GreenMail
-carrying the fixture's users, waits for `bridge.hello`, then runs `tools/seed.py` to provision the
-mail accounts and write the address books and contacts. It is idempotent and keeps the profile, so
-re-run it freely; `--reset` replaces the fixture's own contacts. The fixture lives in
-`tools/fixture.py`, and is the same data `tools/fake-bridge.py` serves without a container.
+`call` and `wait` exist only when the window was started with `--dev`, which also turns on the
+`extensions.noctmalia.dev` pref that gates `dev.provisionAccount` and `dev.eval`.
 
 | Env | Default | Meaning |
 |---|---|---|
@@ -86,6 +84,7 @@ Parameters are named. Each method maps to the `messenger.*` call of the same nam
 | contacts | `contacts.list {parentId}`, `quickSearch {searchString,parentId?}`, `get {contactId}`, `create {parentId,vCard}` → id, `update {contactId,vCard}`, `delete {contactId}`, `getPhoto {contactId}` → `{base64,type}`, `setPhoto {contactId,base64,type}` |
 | mailingLists | `mailingLists.list {parentId}`, `get`/`delete` `{mailingListId}`, `create {parentId,name,nickName?,description?}`, `update {mailingListId,...}`, `addMember`/`removeMember {mailingListId,contactId}`, `listMembers {mailingListId}` |
 | mail | `mail.checkNow {accountId?}`: fetch now instead of waiting for IDLE or biff |
+| bridge | `bridge.quit {}`: a clean Thunderbird exit, the way closing its last window is; replies `true` before it has happened. SIGTERM is not a clean exit for Gecko. |
 | calendar | `calendar.calendars.{query,get,create,update,remove,synchronize}`, `calendar.items.{query,get,create,update,remove}`, `calendar.timezones.getDefinition {tzid,format}`. Items are raw iCal/jCal: `{calendarId, type, format, item}`. |
 | dev | `dev.provisionAccount {email,name,fullName,imap{host,port,socketType,auth,username,password},smtp{...}}`; `dev.eval {code}` (only when pref `extensions.noctmalia.dev` is true) |
 

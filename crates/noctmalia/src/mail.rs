@@ -1,8 +1,8 @@
 //! Mail over the bridge: folders, messages, flags, compose, and Thunderbird's own index.
 //!
-//! The same shape as [`crate::contacts`], for the same reason: typed async functions over
-//! [`Bridge`], errors flattened to `String` because an iced message must be `Clone` and there is
-//! nothing to do with a bridge error but show it.
+//! The same shape as [`crate::people`], for the same reason: typed async functions over
+//! [`Bridge`], failing with [`crate::Error`], which the shell reads before deciding whether
+//! anything needs saying.
 //!
 //! Almost nothing here is ours. Threading is Gloda's `conversationID`, search is Gloda's own
 //! full-text index, flags and tags are Thunderbird's and round-trip to IMAP, and rules are
@@ -15,13 +15,7 @@ use noctmalia_bridge::Bridge;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-/// Errors reach the UI as text: iced messages must be `Clone`, and there is nothing to do with a
-/// bridge error but show it.
-pub type Result<T> = std::result::Result<T, String>;
-
-fn failed<T>(result: std::result::Result<T, noctmalia_bridge::Error>) -> Result<T> {
-    result.map_err(|error| error.to_string())
-}
+pub use crate::error::{Error, Result};
 
 /// How many messages a folder is listed to before the rest is left alone.
 ///
@@ -127,11 +121,11 @@ pub struct Counts {
 }
 
 pub async fn accounts(bridge: Bridge) -> Result<Vec<Account>> {
-    failed(bridge.call("accounts.list", json!({ "includeSubFolders": true })).await)
+    Ok(bridge.call("accounts.list", json!({ "includeSubFolders": true })).await?)
 }
 
 pub async fn counts(bridge: Bridge, folder: String) -> Result<(String, Counts)> {
-    let info = failed(bridge.call("folders.getFolderInfo", json!({ "folderId": folder })).await)?;
+    let info = bridge.call("folders.getFolderInfo", json!({ "folderId": folder })).await?;
     Ok((folder, info))
 }
 
@@ -258,17 +252,17 @@ pub struct Page {
 
 /// The first page of a folder.
 pub async fn list(bridge: Bridge, folder: String) -> Result<Page> {
-    failed(bridge.call("messages.list", json!({ "folderId": folder })).await)
+    Ok(bridge.call("messages.list", json!({ "folderId": folder })).await?)
 }
 
 /// The next page of one already started.
 pub async fn page(bridge: Bridge, list_id: String) -> Result<Page> {
-    failed(bridge.call("messages.continueList", json!({ "listId": list_id })).await)
+    Ok(bridge.call("messages.continueList", json!({ "listId": list_id })).await?)
 }
 
 /// Stops a listing we are no longer interested in, so Thunderbird can drop it.
 pub async fn abort(bridge: Bridge, list_id: String) -> Result<()> {
-    failed(bridge.call_raw("messages.abortList", json!({ "listId": list_id })).await)?;
+    bridge.call_raw("messages.abortList", json!({ "listId": list_id })).await?;
     Ok(())
 }
 
@@ -285,7 +279,7 @@ pub struct Letter {
 }
 
 pub async fn letter(bridge: Bridge, id: u64) -> Result<Letter> {
-    let part: mime::Part = failed(bridge.call("messages.getFull", json!({ "messageId": id })).await)?;
+    let part: mime::Part = bridge.call("messages.getFull", json!({ "messageId": id })).await?;
     Ok(read(id, &part))
 }
 
@@ -311,16 +305,15 @@ struct Binary {
 
 /// The message exactly as it arrived. The escape hatch for everything the renderer flattened.
 pub async fn raw(bridge: Bridge, id: u64) -> Result<String> {
-    let binary: Binary = failed(bridge.call("messages.getRaw", json!({ "messageId": id })).await)?;
-    let bytes = base64::decode(&binary.base64).ok_or_else(|| "the raw message did not decode".to_string())?;
+    let binary: Binary = bridge.call("messages.getRaw", json!({ "messageId": id })).await?;
+    let bytes = base64::decode(&binary.base64).ok_or_else(|| Error::local("the raw message did not decode"))?;
     // A raw message is whatever bytes the sender sent, which need not be valid UTF-8 anywhere.
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 pub async fn attachment(bridge: Bridge, id: u64, part: String) -> Result<Vec<u8>> {
-    let binary: Binary =
-        failed(bridge.call("messages.getAttachment", json!({ "messageId": id, "partName": part })).await)?;
-    base64::decode(&binary.base64).ok_or_else(|| "the attachment did not decode".to_string())
+    let binary: Binary = bridge.call("messages.getAttachment", json!({ "messageId": id, "partName": part })).await?;
+    base64::decode(&binary.base64).ok_or_else(|| Error::local("the attachment did not decode"))
 }
 
 /// What a flag change asks for. `None` leaves a flag alone.
@@ -345,33 +338,29 @@ pub async fn mark(bridge: Bridge, ids: Vec<u64>, flags: Flags) -> Result<()> {
     if properties.is_empty() {
         return Ok(());
     }
-    failed(bridge.call_raw("messages.update", json!({ "messageIds": ids, "properties": properties })).await)?;
+    bridge.call_raw("messages.update", json!({ "messageIds": ids, "properties": properties })).await?;
     Ok(())
 }
 
 pub async fn tag(bridge: Bridge, ids: Vec<u64>, tags: Vec<String>) -> Result<()> {
-    failed(bridge.call_raw("messages.update", json!({ "messageIds": ids, "properties": { "tags": tags } })).await)?;
+    bridge.call_raw("messages.update", json!({ "messageIds": ids, "properties": { "tags": tags } })).await?;
     Ok(())
 }
 
 pub async fn archive(bridge: Bridge, ids: Vec<u64>) -> Result<()> {
-    failed(bridge.call_raw("messages.archive", json!({ "messageIds": ids })).await)?;
+    bridge.call_raw("messages.archive", json!({ "messageIds": ids })).await?;
     Ok(())
 }
 
 pub async fn discard(bridge: Bridge, ids: Vec<u64>) -> Result<()> {
-    failed(
-        bridge
-            .call_raw("messages.delete", json!({ "messageIds": ids, "deletePermanently": false, "isUserAction": true }))
-            .await,
-    )?;
+    bridge
+        .call_raw("messages.delete", json!({ "messageIds": ids, "deletePermanently": false, "isUserAction": true }))
+        .await?;
     Ok(())
 }
 
 pub async fn relocate(bridge: Bridge, ids: Vec<u64>, folder: String) -> Result<()> {
-    failed(
-        bridge.call_raw("messages.move", json!({ "messageIds": ids, "folderId": folder, "isUserAction": true })).await,
-    )?;
+    bridge.call_raw("messages.move", json!({ "messageIds": ids, "folderId": folder, "isUserAction": true })).await?;
     Ok(())
 }
 
@@ -385,9 +374,8 @@ pub async fn restore(bridge: Bridge, message_ids: Vec<String>, folder: String) -
     let mut found = Vec::new();
     for message_id in message_ids {
         // `autoPaginationTimeout: 0` or the call can sit there paginating rather than answering.
-        let page: Page = failed(
-            bridge.call("messages.query", json!({ "headerMessageId": message_id, "autoPaginationTimeout": 0 })).await,
-        )?;
+        let page: Page =
+            bridge.call("messages.query", json!({ "headerMessageId": message_id, "autoPaginationTimeout": 0 })).await?;
         // A message moved to the trash still matches, and so does the original if the move failed;
         // anything already home is not worth moving again.
         found.extend(
@@ -412,7 +400,7 @@ pub async fn query(bridge: Bridge, folder: Option<String>, text: String) -> Resu
     if let Some(folder) = folder {
         params["folderId"] = folder.into();
     }
-    let page: Page = failed(bridge.call("messages.query", params).await)?;
+    let page: Page = bridge.call("messages.query", params).await?;
     Ok(page.messages)
 }
 
@@ -437,14 +425,14 @@ pub struct Conversation {
 /// fetch first. Gloda indexes asynchronously, so a message that has just arrived can briefly have
 /// no conversation; that is a message on its own for a few seconds, not an error.
 pub async fn conversations(bridge: Bridge, message_ids: Vec<String>) -> Result<Vec<Conversation>> {
-    failed(bridge.call("gloda.conversations", json!({ "headerMessageIds": message_ids })).await)
+    Ok(bridge.call("gloda.conversations", json!({ "headerMessageIds": message_ids })).await?)
 }
 
 /// Gloda's own ranked full-text search, which cannot be run from outside Thunderbird's process:
 /// the index declares the `mozporter` tokenizer, which Gecko registers at runtime and stock SQLite
 /// has never heard of.
 pub async fn search(bridge: Bridge, text: String, limit: usize) -> Result<Vec<Header>> {
-    failed(bridge.call("gloda.search", json!({ "query": text, "limit": limit })).await)
+    Ok(bridge.call("gloda.search", json!({ "query": text, "limit": limit })).await?)
 }
 
 // ── Composing ───────────────────────────────────────────────────────────────
@@ -524,15 +512,15 @@ pub async fn send(bridge: Bridge, draft: Draft, deliver: Deliver) -> Result<Stri
         Deliver::Draft => "draft",
     };
     let result: Value = match draft.about {
-        Some((about, reply)) => failed(
+        Some((about, reply)) => {
             bridge
                 .call(
                     "compose.reply",
                     json!({ "messageId": about, "type": reply.method(), "details": details, "mode": mode }),
                 )
-                .await,
-        )?,
-        None => failed(bridge.call("compose.begin", json!({ "details": details, "mode": mode })).await)?,
+                .await?
+        }
+        None => bridge.call("compose.begin", json!({ "details": details, "mode": mode })).await?,
     };
     Ok(result.get("headerMessageId").and_then(Value::as_str).unwrap_or_default().to_string())
 }
@@ -550,7 +538,7 @@ pub struct Identity {
 }
 
 pub async fn identities(bridge: Bridge) -> Result<Vec<Identity>> {
-    failed(bridge.call("identities.list", json!({})).await)
+    Ok(bridge.call("identities.list", json!({})).await?)
 }
 
 // ── Screening ───────────────────────────────────────────────────────────────
@@ -568,7 +556,7 @@ pub struct Rule {
 }
 
 pub async fn rules(bridge: Bridge, account: String) -> Result<Vec<Rule>> {
-    failed(bridge.call("filters.list", json!({ "accountId": account })).await)
+    Ok(bridge.call("filters.list", json!({ "accountId": account })).await?)
 }
 
 /// What a proposed rule would do.
@@ -586,21 +574,19 @@ pub struct Screen {
 }
 
 pub async fn screen(bridge: Bridge, account: String, screen: Screen) -> Result<String> {
-    let created: Value = failed(
-        bridge
-            .call(
-                "filters.create",
-                json!({
-                    "accountId": account,
-                    "name": screen.name,
-                    "header": screen.header,
-                    "value": screen.value,
-                    "folderId": screen.folder,
-                    "folderPath": screen.folder_path,
-                }),
-            )
-            .await,
-    )?;
+    let created: Value = bridge
+        .call(
+            "filters.create",
+            json!({
+                "accountId": account,
+                "name": screen.name,
+                "header": screen.header,
+                "value": screen.value,
+                "folderId": screen.folder,
+                "folderPath": screen.folder_path,
+            }),
+        )
+        .await?;
     Ok(created.get("name").and_then(Value::as_str).unwrap_or(&screen.name).to_string())
 }
 
@@ -618,11 +604,9 @@ pub async fn tidy(bridge: Bridge, folder: String, screen: Screen) -> Result<usiz
     if screen.header != "from" {
         return Ok(0);
     }
-    let page: Page = failed(
-        bridge
-            .call("messages.query", json!({ "folderId": folder, "author": screen.value, "autoPaginationTimeout": 0 }))
-            .await,
-    )?;
+    let page: Page = bridge
+        .call("messages.query", json!({ "folderId": folder, "author": screen.value, "autoPaginationTimeout": 0 }))
+        .await?;
     let ids: Vec<u64> = page.messages.iter().map(|header| header.id).collect();
     if ids.is_empty() {
         return Ok(0);

@@ -21,10 +21,12 @@
 //!   `scrollable`, and a fifty-thousand-message folder is the one place a column of rows does not
 //!   survive.
 
+use crate::error::Error;
 use crate::mail::{self, Account, Counts, Draft, Flags, Folder, Header, Identity, Letter, Reply, Screen};
 use crate::mime;
 use crate::shell::Shell;
-use crate::surfaces::{self, Pressed, Surface, html_view};
+use crate::surfaces::{self, Face, Pressed, Surface, html_view};
+use crate::ui::cursor::{self, Cursor};
 use crate::ui::{self, ROW_GAP, icon};
 use iced::advanced::widget::Id;
 use iced::keyboard::{Key, Modifiers};
@@ -122,7 +124,7 @@ pub enum Message {
     Discard,
     Undo,
     Undone(mail::Result<usize>),
-    Acted(&'static str, mail::Result<()>),
+    Acted(Did, mail::Result<()>),
     Show(Showing),
     Raw(u64, mail::Result<String>),
     /// Fetch an attachment and write it where the desktop puts downloads.
@@ -150,6 +152,33 @@ pub enum Message {
     IndexScrolled(Viewport),
     RailScrolled(Viewport),
     PagerScrolled(Viewport),
+}
+
+/// What a verb did to some messages, once Thunderbird has confirmed it. Whether it moved them is
+/// what decides if there is anything to undo and whether every folder's counts changed, and that
+/// used to be inferred from whether an undo happened to be lying around from earlier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Did {
+    Marked,
+    Flagged,
+    Archived,
+    Deleted,
+}
+
+impl Did {
+    fn label(self) -> &'static str {
+        match self {
+            Did::Marked => "Marked",
+            Did::Flagged => "Flagged",
+            Did::Archived => "Archived",
+            Did::Deleted => "Deleted",
+        }
+    }
+
+    /// Whether the messages left the folder, which is the only thing `u` can put back.
+    fn moved(self) -> bool {
+        matches!(self, Did::Archived | Did::Deleted)
+    }
 }
 
 /// Which of the three regions has the keyboard.
@@ -383,9 +412,10 @@ struct Composing {
 }
 
 struct Motion {
-    message: iced::Animation<f32>,
-    message_shown: iced::Animation<bool>,
-    folder: iced::Animation<f32>,
+    /// The index's selection bar.
+    message: Cursor,
+    /// The rail's, which always has a folder to sit on.
+    folder: Cursor,
     pager: Replay,
     reveal: Replay,
     collapse: iced::Animation<bool>,
@@ -394,9 +424,8 @@ struct Motion {
 impl Motion {
     fn new() -> Motion {
         Motion {
-            message: motion::spring_animation(0.0),
-            message_shown: motion::glide_animation(false),
-            folder: motion::spring_animation(0.0),
+            message: Cursor::hidden(),
+            folder: Cursor::seated(0.0),
             pager: Replay::settled(motion::SETTLE, motion::NORMAL),
             reveal: Replay::settled(motion::GLIDE, motion::SLOW),
             collapse: motion::settle_animation(false),
@@ -404,9 +433,8 @@ impl Motion {
     }
 
     fn animating(&self, now: Instant) -> bool {
-        self.message.is_animating(now)
-            || self.message_shown.is_animating(now)
-            || self.folder.is_animating(now)
+        self.message.animating(now)
+            || self.folder.animating(now)
             || self.pager.is_animating(now)
             || self.reveal.is_animating(now)
             || self.collapse.is_animating(now)
@@ -438,6 +466,8 @@ pub struct Mail {
     /// message is not.
     parsed: Option<(u64, markdown::Content)>,
     source: Option<(u64, String)>,
+    /// The last "original formatting" layout, so a redraw does not re-run litehtml.
+    original: html_view::Cache,
     showing: Showing,
     waiting: bool,
 
@@ -484,6 +514,7 @@ impl Mail {
             letters: HashMap::new(),
             parsed: None,
             source: None,
+            original: html_view::Cache::default(),
             showing: Showing::Letter,
             waiting: false,
             query: String::new(),
@@ -501,122 +532,9 @@ impl Mail {
         }
     }
 
-    pub fn animating(&self, now: Instant) -> bool {
-        self.motion.animating(now)
-    }
-
-    /// Whether a reply, forward or new message is open — `docs/mode-visual-plan.md`'s "compose"
-    /// mode, one of the few genuinely focused-text-widget states mail-plan §5 already named.
-    pub fn composing(&self) -> bool {
-        self.composing.is_some()
-    }
-
-    pub fn typed(&self) -> String {
-        self.pending.typed()
-    }
-
     /// Which region has the keyboard. For tests, and for anything that wants to say so.
     pub fn region(&self) -> Region {
         self.region
-    }
-
-    pub fn entered(&mut self, now: Instant) {
-        self.motion.reveal.restart(now);
-        self.motion.pager.restart(now);
-        self.pending.clear();
-    }
-
-    /// Everything again, from nothing.
-    pub fn resync(&mut self, shell: &Shell) -> Task<Message> {
-        Task::batch([
-            Task::perform(mail::accounts(shell.bridge()), Message::Accounts),
-            Task::perform(mail::identities(shell.bridge()), Message::Identities),
-        ])
-    }
-
-    /// The keybound actions worth finding by name — `docs/command-palette-plan.md` §3.2. Pure
-    /// cursor movement and pane focus (`Binding::Down`/`Up`/`Top`/`Bottom`/`HalfDown`/`HalfUp`/
-    /// `PageDown`/`PageUp`/`Open`/`Back`/`Fold`) is left out: it exists to be repeated or held,
-    /// not looked up by name. `Go to <folder>` only appears for a folder this account actually
-    /// has.
-    pub fn commands(&self) -> Vec<crate::commands::Entry<Message>> {
-        use crate::commands::Entry;
-        let mut entries = vec![
-            Entry::new("Mark", Some("x"), Message::Mark),
-            Entry::new("Flag", Some("s"), Message::Flag),
-            Entry::new("Mark unread", Some("N"), Message::Unread),
-            Entry::new("Next unread", Some("n"), Message::NextUnread),
-            Entry::new("Archive", Some("e"), Message::Archive),
-            Entry::new("Delete", Some("d"), Message::Discard),
-            Entry::new("Undo", Some("u"), Message::Undo),
-            Entry::new("Compose", Some("m"), Message::Compose(None)),
-            Entry::new("Reply", Some("r"), Message::Compose(Some(Reply::Sender))),
-            Entry::new("Reply all", Some("R"), Message::Compose(Some(Reply::All))),
-            Entry::new("Forward", Some("f"), Message::Compose(Some(Reply::Forward))),
-            Entry::new("Search", Some("/"), Message::Search).exposed(),
-            Entry::new("Show raw source", Some("\\"), Message::Show(Showing::Source)),
-            Entry::new("Show headers", Some("H"), Message::Show(Showing::Headers)),
-            Entry::new("Show security surface", Some("!"), Message::Show(Showing::Security)),
-            Entry::new("Show original formatting", Some("o"), Message::Show(Showing::Original)),
-            Entry::new("Open elsewhere", Some("O"), Message::External),
-            Entry::new("Propose a screening rule", Some("S"), Message::Screen),
-            Entry::new("Refresh", Some("<C-r>"), Message::Refresh).exposed(),
-        ];
-        for (label, purpose, hint) in [
-            ("Go to Inbox", "inbox", "g i"),
-            ("Go to Sent", "sent", "g s"),
-            ("Go to Drafts", "drafts", "g d"),
-            ("Go to Archives", "archives", "g a"),
-            ("Go to Trash", "trash", "g t"),
-        ] {
-            if let Some(id) = self.folder_for(purpose) {
-                entries.push(Entry::new(label, Some(hint), Message::OpenFolder(id)));
-            }
-        }
-        entries
-    }
-
-    /// The currently loaded rows, as jump targets for quick-open —
-    /// `docs/command-palette-plan.md` §4.2. Only what has already paged in; a folder's own `/`
-    /// filter is still the way to reach a message quick-open hasn't loaded yet.
-    pub fn quick_items(&self) -> Vec<crate::commands::Entry<Message>> {
-        self.headers
-            .iter()
-            .map(|header| {
-                let label = if header.author.is_empty() {
-                    header.subject.clone()
-                } else {
-                    format!("{} — {}", header.subject, header.author)
-                };
-                crate::commands::Entry::new(label, None, Message::Select(header.id))
-            })
-            .collect()
-    }
-
-    /// A forwarded Thunderbird event.
-    ///
-    /// New mail and a folder's counts changing are worth acting on; a message being updated by us
-    /// is not, because we already drew the change. Reloading the whole index on every `onUpdated`
-    /// would make marking fifty messages read fifty full listings.
-    pub fn notify(&mut self, name: &str, data: &Value, shell: &Shell) -> Task<Message> {
-        match name {
-            "messages.onNewMailReceived" => {
-                let arrived = data.get("folder").and_then(|folder| folder.get("id")).and_then(Value::as_str);
-                let mut tasks = vec![self.refresh_counts(shell)];
-                if arrived.is_some() && arrived == self.folder.as_deref() {
-                    tasks.push(self.reload(shell));
-                }
-                Task::batch(tasks)
-            }
-            "folders.onFolderInfoChanged" => self.refresh_counts(shell),
-            "folders.onCreated" | "folders.onDeleted" | "folders.onRenamed" | "accounts.onCreated"
-            | "accounts.onDeleted" => Task::perform(mail::accounts(shell.bridge()), Message::Accounts),
-            // A move or a delete performed elsewhere genuinely changes what is in front of us.
-            "messages.onMoved" | "messages.onDeleted" | "messages.onCopied" => {
-                Task::batch([self.refresh_counts(shell), self.reload(shell)])
-            }
-            _ => Task::none(),
-        }
     }
 
     /// Every folder's counts. One round trip per folder, so this is for the moments when any of
@@ -640,78 +558,6 @@ impl Mail {
             Some(folder) => Task::perform(mail::counts(shell.bridge(), folder), Message::Counts),
             None => Task::none(),
         }
-    }
-
-    /// One key press, against the table for whichever region has the keyboard.
-    pub fn press(&mut self, key: &Key, modifiers: Modifiers) -> Pressed<Message> {
-        // While the composer is open the keyboard belongs to it, except for the way out.
-        if self.composing.is_some() {
-            return match key.as_ref() {
-                Key::Named(iced::keyboard::key::Named::Escape) => Pressed::Act(Message::Cancel),
-                Key::Character("\r") | Key::Named(iced::keyboard::key::Named::Enter) if modifiers.command() => {
-                    Pressed::Act(Message::Send)
-                }
-                Key::Character("s") if modifiers.command() => Pressed::Act(Message::Draft),
-                _ => Pressed::Ignored,
-            };
-        }
-        let table = match self.region {
-            Region::Rail => &RAIL_KEYS,
-            Region::Index => &INDEX_KEYS,
-            Region::Pager => &PAGER_KEYS,
-        };
-        let resolved = table.with(|keys| keys.press(&mut self.pending, key, modifiers));
-        let (binding, count) = match resolved {
-            keymap::Resolved::Ignored => return Pressed::Ignored,
-            keymap::Resolved::Pending => return Pressed::Pending,
-            keymap::Resolved::Action(binding, count) => (binding, count),
-        };
-        let count = count as i32;
-        Pressed::Act(match binding {
-            Binding::Go(surface) => return Pressed::Switch(surface),
-            Binding::Down => Message::Step(count),
-            Binding::Up => Message::Step(-count),
-            Binding::Top => Message::Edge(false),
-            Binding::Bottom => Message::Edge(true),
-            Binding::HalfDown => self.by_page(0.5 * count as f32),
-            Binding::HalfUp => self.by_page(-0.5 * count as f32),
-            Binding::PageDown => self.by_page(PAGE_FRACTION * count as f32),
-            Binding::PageUp => self.by_page(-PAGE_FRACTION * count as f32),
-            Binding::Open => match self.region {
-                Region::Rail => Message::Focus(Region::Index),
-                _ => Message::Focus(Region::Pager),
-            },
-            Binding::Back => match self.region {
-                Region::Pager => Message::Focus(Region::Index),
-                _ => Message::Focus(Region::Rail),
-            },
-            Binding::Fold => Message::Fold,
-            Binding::Mark => Message::Mark,
-            Binding::Flag => Message::Flag,
-            Binding::Unread => Message::Unread,
-            Binding::NextUnread => Message::NextUnread,
-            Binding::Archive => Message::Archive,
-            Binding::Discard => Message::Discard,
-            Binding::Undo => Message::Undo,
-            Binding::Compose => Message::Compose(None),
-            Binding::Reply => Message::Compose(Some(Reply::Sender)),
-            Binding::ReplyAll => Message::Compose(Some(Reply::All)),
-            Binding::Forward => Message::Compose(Some(Reply::Forward)),
-            Binding::Search => Message::Search,
-            Binding::Source => Message::Show(Showing::Source),
-            Binding::Original => Message::Show(Showing::Original),
-            Binding::Headers => Message::Show(Showing::Headers),
-            Binding::Security => Message::Show(Showing::Security),
-            Binding::Letter => Message::Show(Showing::Letter),
-            Binding::OpenElsewhere => Message::External,
-            Binding::Screen => Message::Screen,
-            Binding::Refresh => Message::Refresh,
-            Binding::Escape => Message::Escape,
-            Binding::Folder(purpose) => match self.folder_for(purpose) {
-                Some(id) => Message::OpenFolder(id),
-                None => return Pressed::Ignored,
-            },
-        })
     }
 
     /// Scrolling by pages means different things in the two regions: rows in the index, pixels in
@@ -738,14 +584,6 @@ impl Mail {
 // ── Update ──────────────────────────────────────────────────────────────────
 
 impl Mail {
-    pub fn update(&mut self, message: Message, shell: &mut Shell, now: Instant) -> Task<Message> {
-        let task = self.step(message, shell, now);
-        // Almost anything can have opened or closed the letter, or changed how much room there is
-        // for it, and `step` returns from a dozen places.
-        self.motion.collapse.go_mut(self.rail_collapsed(shell.width()), now);
-        task
-    }
-
     fn step(&mut self, message: Message, shell: &mut Shell, now: Instant) -> Task<Message> {
         match message {
             // Caught by `App::update` before it reaches here — see the variant's own doc comment.
@@ -755,12 +593,12 @@ impl Mail {
                 self.rail = flatten(&self.accounts);
                 let open = self.folder.clone().filter(|id| self.folders().any(|folder| &folder.id == id));
                 self.folder = open.or_else(|| self.folder_for("inbox"));
-                self.motion.folder = motion::spring_animation(self.folder_row() as f32);
+                self.motion.folder.seat(Some(self.folder_row() as f32), now);
                 return Task::batch([self.refresh_counts(shell), self.reload(shell)]);
             }
-            Message::Accounts(Err(error)) => shell.fail(error, now),
+            Message::Accounts(Err(error)) => shell.report(&error, now),
             Message::Identities(Ok(identities)) => self.identities = identities,
-            Message::Identities(Err(error)) => shell.fail(error, now),
+            Message::Identities(Err(error)) => shell.report(&error, now),
             Message::Counts(Ok((folder, counts))) => {
                 self.counts.insert(folder, counts);
             }
@@ -769,7 +607,7 @@ impl Mail {
             Message::OpenFolder(id) => {
                 if self.folder.as_deref() != Some(id.as_str()) {
                     self.folder = Some(id);
-                    self.motion.folder.go_mut(self.folder_row() as f32, now);
+                    self.motion.folder.aim(Some(self.folder_row() as f32), now);
                     self.query.clear();
                     self.deep = false;
                     return Task::batch([self.reload(shell), self.follow_rail()]);
@@ -804,7 +642,7 @@ impl Mail {
                     }
                     Err(error) => {
                         self.listing = false;
-                        shell.fail(error, now);
+                        shell.report(&error, now);
                     }
                 }
             }
@@ -825,7 +663,8 @@ impl Mail {
             // face. Say it once, on stderr, where it belongs.
             Message::Conversations(_, Err(error)) => eprintln!("noctmalia: no threads from Gloda: {error}"),
 
-            Message::Select(id) => return self.select(id, shell, now),
+            // A click is a choice, the way Enter is.
+            Message::Select(id) => return self.open(id, shell, now),
             Message::Letter(id, Ok(letter)) => {
                 self.waiting = false;
                 if self.selected == Some(id) {
@@ -836,7 +675,7 @@ impl Mail {
             }
             Message::Letter(_, Err(error)) => {
                 self.waiting = false;
-                shell.fail(error, now);
+                shell.report(&error, now);
             }
 
             Message::Fold => {
@@ -868,9 +707,15 @@ impl Mail {
                 self.region = region;
                 self.pending.clear();
                 // Walking right off the index opens what is under the cursor, which is what makes
-                // `l` mean the same thing in both places.
-                if region == Region::Pager && self.selected.is_none() {
-                    return self.move_selection(1, shell, now);
+                // `l` mean the same thing in both places — and entering the pager is what reads
+                // the letter, where merely resting the cursor on it did not.
+                if region == Region::Pager {
+                    let moved = if self.selected.is_none() { self.move_selection(1, shell, now) } else { Task::none() };
+                    let read = match self.selected {
+                        Some(id) => self.mark_read(id, shell),
+                        None => Task::none(),
+                    };
+                    return Task::batch([moved, read]);
                 }
             }
 
@@ -910,7 +755,7 @@ impl Mail {
                         let found = self.headers.len();
                         shell.announce(format!("{found} found across every folder"), now);
                     }
-                    Err(error) => shell.fail(format!("{error} — searching the loaded list instead"), now),
+                    Err(error) => shell.report_in("Searching the loaded list instead", &error, now),
                 }
             }
 
@@ -936,7 +781,7 @@ impl Mail {
                 }
                 let flags = Flags { flagged: Some(flagged), ..Flags::default() };
                 return Task::perform(mail::mark(shell.bridge(), ids, flags), |result| {
-                    Message::Acted("Flagged", result)
+                    Message::Acted(Did::Flagged, result)
                 });
             }
             Message::Unread => {
@@ -952,7 +797,7 @@ impl Mail {
                 }
                 let flags = Flags { read: Some(read), ..Flags::default() };
                 return Task::perform(mail::mark(shell.bridge(), ids, flags), |result| {
-                    Message::Acted("Marked", result)
+                    Message::Acted(Did::Marked, result)
                 });
             }
             Message::NextUnread => {
@@ -962,13 +807,13 @@ impl Mail {
                     .find(|row| !self.headers[self.rows[*row].at].read);
                 if let Some(row) = found {
                     let id = self.headers[self.rows[row].at].id;
-                    return self.select(id, shell, now);
+                    return self.open(id, shell, now);
                 }
                 shell.announce("Nothing unread here", now);
             }
 
-            Message::Archive => return self.remove("Archived", shell, now, mail::archive),
-            Message::Discard => return self.remove("Deleted", shell, now, mail::discard),
+            Message::Archive => return self.remove(Did::Archived, shell, now, mail::archive),
+            Message::Discard => return self.remove(Did::Deleted, shell, now, mail::discard),
             Message::Undo => {
                 let Some(undo) = self.undo.take() else {
                     shell.announce("Nothing to undo", now);
@@ -981,17 +826,21 @@ impl Mail {
                 shell.announce(if count == 1 { "Put back".to_string() } else { format!("{count} put back") }, now);
                 return self.reload(shell);
             }
-            Message::Undone(Err(error)) => shell.fail(error, now),
-            Message::Acted(what, Ok(())) => {
-                if self.undo.is_some() {
-                    shell.announce(format!("{what} — u to undo"), now);
+            Message::Undone(Err(error)) => shell.report(&error, now),
+            Message::Acted(did, Ok(())) => {
+                if did.moved() {
+                    shell.announce(format!("{} — u to undo", did.label()), now);
                     // A message left the folder, so more than this folder's numbers moved.
                     return self.refresh_counts(shell);
                 }
                 return self.refresh_open_count(shell);
             }
-            Message::Acted(what, Err(error)) => {
-                shell.fail(format!("{what}: {error}"), now);
+            Message::Acted(did, Err(error)) => {
+                shell.report_in(did.label(), &error, now);
+                if did.moved() {
+                    // Nothing moved, so there is nothing to put back.
+                    self.undo = None;
+                }
                 // What is on screen no longer matches what Thunderbird holds.
                 return self.reload(shell);
             }
@@ -1006,7 +855,7 @@ impl Mail {
                 }
             }
             Message::Raw(id, Ok(source)) => self.source = Some((id, source)),
-            Message::Raw(_, Err(error)) => shell.fail(error, now),
+            Message::Raw(_, Err(error)) => shell.report(&error, now),
 
             Message::Save(part) => {
                 let Some(id) = self.selected else { return Task::none() };
@@ -1026,10 +875,10 @@ impl Mail {
                 );
             }
             Message::Saved(Ok(path)) => shell.announce(format!("Saved to {path}"), now),
-            Message::Saved(Err(error)) => shell.fail(error, now),
+            Message::Saved(Err(error)) => shell.report(&error, now),
             Message::OpenLink(url) => match open_externally(&url) {
                 Ok(()) => shell.announce(format!("Opened {url}"), now),
-                Err(error) => shell.fail(error, now),
+                Err(error) => shell.report(&error, now),
             },
             Message::External => {
                 let Some(id) = self.selected else { return Task::none() };
@@ -1086,7 +935,7 @@ impl Mail {
                 self.motion.pager.restart(now);
                 shell.announce("Sent", now);
             }
-            Message::Sent(Err(error)) => shell.fail(error, now),
+            Message::Sent(Err(error)) => shell.report(&error, now),
 
             Message::Screen => {
                 let Some(proposal) = self.propose() else {
@@ -1128,7 +977,7 @@ impl Mail {
                 };
                 return Task::perform(mail::tidy(shell.bridge(), folder, screen), Message::Tidied);
             }
-            Message::Screened(Err(error)) => shell.fail(error, now),
+            Message::Screened(Err(error)) => shell.report(&error, now),
             Message::Rules(Ok(rules)) => self.rules = rules,
             Message::Rules(Err(_)) => self.rules.clear(),
             Message::Tidied(Ok(moved)) => {
@@ -1144,7 +993,7 @@ impl Mail {
                     return self.reload(shell);
                 }
             }
-            Message::Tidied(Err(error)) => shell.fail(error, now),
+            Message::Tidied(Err(error)) => shell.report(&error, now),
 
             Message::Cancel => {
                 self.composing = None;
@@ -1220,7 +1069,10 @@ impl Mail {
         })
     }
 
-    /// Selects a message, fetches it if it is not already held, and marks it read.
+    /// Puts the cursor on a message and shows it, fetching it if it is not already held. This
+    /// does *not* mark it read: `j` is for looking down a list, and a list you cannot look down
+    /// without reading all of it is Gmail's problem, not mutt's. [`open`](Mail::open) is what
+    /// reads.
     fn select(&mut self, id: u64, shell: &mut Shell, now: Instant) -> Task<Message> {
         self.selected = Some(id);
         self.showing = Showing::Letter;
@@ -1232,19 +1084,6 @@ impl Mail {
         if !self.letters.contains_key(&id) {
             self.waiting = true;
             tasks.push(Task::perform(mail::letter(shell.bridge(), id), move |result| Message::Letter(id, result)));
-        }
-        // Reading it is what makes it read. Thunderbird owns the flag; the row changes now so the
-        // list does not wait for a round trip to stop being bold.
-        if self.header(id).is_some_and(|header| !header.read) {
-            if let Some(header) = self.header_mut(id) {
-                header.read = true;
-            }
-            let flags = Flags { read: Some(true), ..Flags::default() };
-            // The count comes back with the reply to the flag change; asking for it here as well
-            // would be two round trips per folder for every message read.
-            tasks.push(Task::perform(mail::mark(shell.bridge(), vec![id], flags), |result| {
-                Message::Acted("Marked", result)
-            }));
         }
         // The next row is usually the next thing read, and a round trip through a Python shim is
         // long enough to notice. One row ahead, never more: prefetching a screenful would be a
@@ -1260,13 +1099,32 @@ impl Mail {
         Task::batch(tasks)
     }
 
-    /// Moves the selection by rows, in whichever region has the keyboard.
+    /// [`select`](Mail::select), and it counts as read: Enter, `l`, a click, `n`.
+    fn open(&mut self, id: u64, shell: &mut Shell, now: Instant) -> Task<Message> {
+        Task::batch([self.select(id, shell, now), self.mark_read(id, shell)])
+    }
+
+    /// Reading it is what makes it read. Thunderbird owns the flag; the row changes now so the
+    /// list does not wait for a round trip to stop being bold.
+    fn mark_read(&mut self, id: u64, shell: &Shell) -> Task<Message> {
+        if !self.header(id).is_some_and(|header| !header.read) {
+            return Task::none();
+        }
+        if let Some(header) = self.header_mut(id) {
+            header.read = true;
+        }
+        let flags = Flags { read: Some(true), ..Flags::default() };
+        // The count comes back with the reply to the flag change; asking for it here as well
+        // would be two round trips per folder for every message read.
+        Task::perform(mail::mark(shell.bridge(), vec![id], flags), |result| Message::Acted(Did::Marked, result))
+    }
+
     fn move_selection(&mut self, delta: i32, shell: &mut Shell, now: Instant) -> Task<Message> {
         if self.region == Region::Rail {
             let Some(row) = self.perch_at(self.folder_row(), delta) else { return Task::none() };
             let Some(folder) = self.rail[row].folder() else { return Task::none() };
             let id = folder.id.clone();
-            self.motion.folder.go_mut(row as f32, now);
+            self.motion.folder.aim(Some(row as f32), now);
             return Task::batch([self.follow_rail(), Task::done(Message::OpenFolder(id))]);
         }
         if self.rows.is_empty() {
@@ -1289,7 +1147,7 @@ impl Mail {
     /// a numeric id survived the move.
     fn remove<F>(
         &mut self,
-        what: &'static str,
+        did: Did,
         shell: &mut Shell,
         now: Instant,
         act: impl FnOnce(noctmalia_bridge::Bridge, Vec<u64>) -> F,
@@ -1316,7 +1174,7 @@ impl Mail {
         self.aim(now);
         self.undo = Some(Undo { message_ids, folder });
 
-        let mut tasks = vec![Task::perform(act(shell.bridge(), ids), move |result| Message::Acted(what, result))];
+        let mut tasks = vec![Task::perform(act(shell.bridge(), ids), move |result| Message::Acted(did, result))];
         if let Some(id) = self.selected {
             tasks.push(self.select(id, shell, now));
         } else {
@@ -1368,32 +1226,15 @@ impl Mail {
     }
 
     fn aim(&mut self, now: Instant) {
-        match self.selected_row() {
-            Some(row) => {
-                self.motion.message.go_mut(row as f32, now);
-                self.motion.message_shown.go_mut(true, now);
-            }
-            None => self.motion.message_shown.go_mut(false, now),
-        }
+        self.motion.message.aim(self.selected_row().map(|row| row as f32), now);
     }
 
     fn follow_index(&self) -> Task<Message> {
-        let (Some(row), Some(view)) = (self.selected_row(), self.index_view) else { return Task::none() };
-        let target = list::reveal(row, MESSAGE_PITCH, MESSAGE_ROW, view.absolute_offset().y, view.bounds().height);
-        match target {
-            Some(y) => operation::scroll_to(Id::new(INDEX_ID), AbsoluteOffset { x: 0.0, y }),
-            None => Task::none(),
-        }
+        cursor::follow(self.selected_row(), MESSAGE_PITCH, MESSAGE_ROW, self.index_view, Id::new(INDEX_ID))
     }
 
     fn follow_rail(&self) -> Task<Message> {
-        let Some(view) = self.rail_view else { return Task::none() };
-        let target =
-            list::reveal(self.folder_row(), FOLDER_PITCH, FOLDER_ROW, view.absolute_offset().y, view.bounds().height);
-        match target {
-            Some(y) => operation::scroll_to(Id::new(RAIL_ID), AbsoluteOffset { x: 0.0, y }),
-            None => Task::none(),
-        }
+        cursor::follow(Some(self.folder_row()), FOLDER_PITCH, FOLDER_ROW, self.rail_view, Id::new(RAIL_ID))
     }
 
     /// Whether the rail should trade its labels for glyphs, at this window's width.
@@ -1674,7 +1515,7 @@ fn downloads() -> std::path::PathBuf {
 /// Writes a file without ever replacing one, and says where it went.
 fn write_down(name: &str, bytes: &[u8]) -> mail::Result<String> {
     let directory = downloads();
-    std::fs::create_dir_all(&directory).map_err(|error| format!("{}: {error}", directory.display()))?;
+    std::fs::create_dir_all(&directory).map_err(|error| Error::Local(format!("{}: {error}", directory.display())))?;
     let (stem, extension) = match name.rsplit_once('.') {
         Some((stem, extension)) if !stem.is_empty() => (stem.to_string(), format!(".{extension}")),
         _ => (name.to_string(), String::new()),
@@ -1688,10 +1529,10 @@ fn write_down(name: &str, bytes: &[u8]) -> mail::Result<String> {
         if candidate.exists() {
             continue;
         }
-        std::fs::write(&candidate, bytes).map_err(|error| format!("{}: {error}", candidate.display()))?;
+        std::fs::write(&candidate, bytes).map_err(|error| Error::Local(format!("{}: {error}", candidate.display())))?;
         return Ok(candidate.display().to_string());
     }
-    Err(format!("{} already has a thousand of these", directory.display()))
+    Err(Error::Local(format!("{} already has a thousand of these", directory.display())))
 }
 
 /// Hands something to the desktop.
@@ -1706,7 +1547,7 @@ fn open_externally(target: &str) -> mail::Result<()> {
         .stderr(std::process::Stdio::null())
         .spawn()
         .map(|_| ())
-        .map_err(|error| format!("cannot open {target}: {error}"))
+        .map_err(|error| Error::Local(format!("cannot open {target}: {error}")))
 }
 
 // ── View ────────────────────────────────────────────────────────────────────
@@ -1778,16 +1619,10 @@ impl<'a> markdown::Viewer<'a, Message> for Reader {
 }
 
 impl Mail {
-    pub fn view(&self, shell: &Shell, now: Instant) -> Element<'_, Message> {
-        row![self.rail_pane(now), ui::hairline_y(), self.index_pane(now), ui::hairline_y(), self.right_pane(shell, now)]
-            .height(Length::Fill)
-            .into()
-    }
-
     // ── The rail ────────────────────────────────────────────────────────────
 
     fn rail_pane(&self, now: Instant) -> Element<'_, Message> {
-        let at = self.motion.folder.interpolate_with(|row| row, now);
+        let at = self.motion.folder.at(now);
         let showing = 1.0 - self.motion.collapse.interpolate(0.0, 1.0, now).clamp(0.0, 1.0);
         let focused = self.region == Region::Rail;
 
@@ -1897,8 +1732,8 @@ impl Mail {
             let offset = self.index_view.map_or(0.0, |view| view.absolute_offset().y);
             let height = self.index_view.map_or(0.0, |view| view.bounds().height);
             let window = list::window(self.rows.len(), MESSAGE_PITCH, offset, height);
-            let at = self.motion.message.interpolate_with(|row| row, now);
-            let shown = self.motion.message_shown.interpolate(0.0, 1.0, now);
+            let at = self.motion.message.at(now);
+            let shown = self.motion.message.presence(now);
             let reveal = self.motion.reveal.linear(now);
 
             let built = window.range().map(|index| {
@@ -2143,7 +1978,7 @@ impl Mail {
             (Showing::Headers, Some(letter)) => headers_view(letter),
             (Showing::Security, Some(letter)) => security_view(letter),
             (Showing::Source, Some(_)) => self.source_view(id),
-            (Showing::Original, Some(letter)) => original_view(letter),
+            (Showing::Original, Some(letter)) => original_view(letter, &self.original),
         };
 
         let mut pane = column![self.envelope(header, letter), ui::hairline_x(), body].spacing(theme::SPACE_MD);
@@ -2249,7 +2084,7 @@ impl Mail {
         .align_y(Alignment::Center);
         // Only a letter that actually arrived as HTML has an "as sent" to show — offering this for
         // plain text or Markdown mail would toggle into a blank pane.
-        if letter.is_some_and(|letter| letter.body.raw_html.is_some()) {
+        if letter.is_some_and(|letter| letter.body.html.is_some()) {
             bar = bar.push(ui::icon_button(
                 icon::EYE,
                 "Original formatting  ·  o",
@@ -2283,7 +2118,8 @@ impl Mail {
         };
         // No selection to read out of a right-click — `docs/context-commands-plan.md` §0 — so the
         // whole rendered body is what a template runs against, same as `\` shows the whole source.
-        let content = mouse_area(content).on_right_press(Message::ContextMenu(letter.body.markdown.clone(), "mail-body"));
+        let content =
+            mouse_area(content).on_right_press(Message::ContextMenu(letter.body.markdown.clone(), "mail-body"));
         scrollable(container(content).padding(Padding { right: theme::SPACE_MD, ..Padding::ZERO }))
             .id(Id::new(PAGER_ID))
             .on_scroll(Message::PagerScrolled)
@@ -2495,16 +2331,17 @@ fn level_colour(level: mime::headers::Level) -> Color {
 
 /// Every header, with the ones worth reading first.
 /// Real CSS layout, for the letter the user explicitly asked to see "as sent" instead of
-/// downconverted to Markdown. `letter.body.raw_html` only exists for [`mime::Flavour::Html`]
-/// letters (`mime/mod.rs`) — a plain-text or Markdown message has nothing this mode adds.
-fn original_view(letter: &Letter) -> Element<'_, Message> {
-    let Some(html) = letter.body.raw_html.as_deref() else {
+/// downconverted to Markdown. `letter.body.html` — the sender's HTML with the allowlist applied,
+/// never the bytes as sent — only exists for letters with an HTML part (`mime/mod.rs`); a
+/// plain-text or Markdown message has nothing this mode adds.
+fn original_view<'a>(letter: &'a Letter, cache: &'a html_view::Cache) -> Element<'a, Message> {
+    let Some(html) = letter.body.html.as_deref() else {
         return container(ui::caption("This message didn't arrive as HTML — nothing to show differently."))
             .center_x(Length::Fill)
             .padding(theme::SPACE_LG)
             .into();
     };
-    scrollable(container(html_view::view(html)).padding(Padding { right: theme::SPACE_MD, ..Padding::ZERO }))
+    scrollable(container(html_view::view(html, cache)).padding(Padding { right: theme::SPACE_MD, ..Padding::ZERO }))
         .id(Id::new(PAGER_ID))
         .on_scroll(Message::PagerScrolled)
         .style(theme::scrollable_style)
@@ -2672,6 +2509,221 @@ fn attachments(all: &[mime::Attachment]) -> Element<'_, Message> {
     scrollable(strip).direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::new())).into()
 }
 
+impl Face for Mail {
+    type Message = Message;
+    const SURFACE: Surface = Surface::Mail;
+
+    fn update(&mut self, message: Message, shell: &mut Shell, now: Instant) -> Task<Message> {
+        let task = self.step(message, shell, now);
+        // Almost anything can have opened or closed the letter, or changed how much room there is
+        // for it, and `step` returns from a dozen places.
+        self.motion.collapse.go_mut(self.rail_collapsed(shell.width()), now);
+        task
+    }
+
+    fn view(&self, shell: &Shell, now: Instant) -> Element<'_, Message> {
+        row![self.rail_pane(now), ui::hairline_y(), self.index_pane(now), ui::hairline_y(), self.right_pane(shell, now)]
+            .height(Length::Fill)
+            .into()
+    }
+
+    /// One key press, against the table for whichever region has the keyboard.
+    fn press(&mut self, key: &Key, modifiers: Modifiers) -> Pressed<Message> {
+        // While the composer is open the keyboard belongs to it, except for the way out.
+        if self.composing.is_some() {
+            return match key.as_ref() {
+                Key::Named(iced::keyboard::key::Named::Escape) => Pressed::Act(Message::Cancel),
+                Key::Character("\r") | Key::Named(iced::keyboard::key::Named::Enter) if modifiers.command() => {
+                    Pressed::Act(Message::Send)
+                }
+                Key::Character("s") if modifiers.command() => Pressed::Act(Message::Draft),
+                _ => Pressed::Ignored,
+            };
+        }
+        let table = match self.region {
+            Region::Rail => &RAIL_KEYS,
+            Region::Index => &INDEX_KEYS,
+            Region::Pager => &PAGER_KEYS,
+        };
+        let resolved = table.with(|keys| keys.press(&mut self.pending, key, modifiers));
+        let (binding, count) = match resolved {
+            keymap::Resolved::Ignored => return Pressed::Ignored,
+            keymap::Resolved::Pending => return Pressed::Pending,
+            keymap::Resolved::Action(binding, count) => (binding, count),
+        };
+        let count = count as i32;
+        Pressed::Act(match binding {
+            Binding::Go(surface) => return Pressed::Switch(surface),
+            Binding::Down => Message::Step(count),
+            Binding::Up => Message::Step(-count),
+            Binding::Top => Message::Edge(false),
+            Binding::Bottom => Message::Edge(true),
+            Binding::HalfDown => self.by_page(0.5 * count as f32),
+            Binding::HalfUp => self.by_page(-0.5 * count as f32),
+            Binding::PageDown => self.by_page(PAGE_FRACTION * count as f32),
+            Binding::PageUp => self.by_page(-PAGE_FRACTION * count as f32),
+            Binding::Open => match self.region {
+                Region::Rail => Message::Focus(Region::Index),
+                _ => Message::Focus(Region::Pager),
+            },
+            Binding::Back => match self.region {
+                Region::Pager => Message::Focus(Region::Index),
+                _ => Message::Focus(Region::Rail),
+            },
+            Binding::Fold => Message::Fold,
+            Binding::Mark => Message::Mark,
+            Binding::Flag => Message::Flag,
+            Binding::Unread => Message::Unread,
+            Binding::NextUnread => Message::NextUnread,
+            Binding::Archive => Message::Archive,
+            Binding::Discard => Message::Discard,
+            Binding::Undo => Message::Undo,
+            Binding::Compose => Message::Compose(None),
+            Binding::Reply => Message::Compose(Some(Reply::Sender)),
+            Binding::ReplyAll => Message::Compose(Some(Reply::All)),
+            Binding::Forward => Message::Compose(Some(Reply::Forward)),
+            Binding::Search => Message::Search,
+            Binding::Source => Message::Show(Showing::Source),
+            Binding::Original => Message::Show(Showing::Original),
+            Binding::Headers => Message::Show(Showing::Headers),
+            Binding::Security => Message::Show(Showing::Security),
+            Binding::Letter => Message::Show(Showing::Letter),
+            Binding::OpenElsewhere => Message::External,
+            Binding::Screen => Message::Screen,
+            Binding::Refresh => Message::Refresh,
+            Binding::Escape => Message::Escape,
+            Binding::Folder(purpose) => match self.folder_for(purpose) {
+                Some(id) => Message::OpenFolder(id),
+                None => return Pressed::Ignored,
+            },
+        })
+    }
+
+    /// A forwarded Thunderbird event.
+    ///
+    /// New mail and a folder's counts changing are worth acting on; a message being updated by us
+    /// is not, because we already drew the change. Reloading the whole index on every `onUpdated`
+    /// would make marking fifty messages read fifty full listings.
+    fn notify(&mut self, name: &str, data: &Value, shell: &Shell) -> Task<Message> {
+        match name {
+            "messages.onNewMailReceived" => {
+                let arrived = data.get("folder").and_then(|folder| folder.get("id")).and_then(Value::as_str);
+                let mut tasks = vec![self.refresh_counts(shell)];
+                if arrived.is_some() && arrived == self.folder.as_deref() {
+                    tasks.push(self.reload(shell));
+                }
+                Task::batch(tasks)
+            }
+            "folders.onFolderInfoChanged" => self.refresh_counts(shell),
+            "folders.onCreated" | "folders.onDeleted" | "folders.onRenamed" | "accounts.onCreated"
+            | "accounts.onDeleted" => Task::perform(mail::accounts(shell.bridge()), Message::Accounts),
+            // A move or a delete performed elsewhere genuinely changes what is in front of us.
+            "messages.onMoved" | "messages.onDeleted" | "messages.onCopied" => {
+                Task::batch([self.refresh_counts(shell), self.reload(shell)])
+            }
+            _ => Task::none(),
+        }
+    }
+
+    /// Everything again, from nothing.
+    fn resync(&mut self, shell: &Shell) -> Task<Message> {
+        Task::batch([
+            Task::perform(mail::accounts(shell.bridge()), Message::Accounts),
+            Task::perform(mail::identities(shell.bridge()), Message::Identities),
+        ])
+    }
+
+    fn entered(&mut self, now: Instant) {
+        self.motion.reveal.restart(now);
+        self.motion.pager.restart(now);
+        self.pending.clear();
+    }
+
+    fn animating(&self, now: Instant) -> bool {
+        self.motion.animating(now)
+    }
+
+    fn typed(&self) -> String {
+        self.pending.typed()
+    }
+
+    /// Whether a reply, forward or new message is open — `docs/mode-visual-plan.md`'s "compose"
+    /// mode, one of the few genuinely focused-text-widget states mail-plan §5 already named.
+    fn composing(&self) -> bool {
+        self.composing.is_some()
+    }
+
+    /// The keybound actions worth finding by name — `docs/command-palette-plan.md` §3.2. Pure
+    /// cursor movement and pane focus (`Binding::Down`/`Up`/`Top`/`Bottom`/`HalfDown`/`HalfUp`/
+    /// `PageDown`/`PageUp`/`Open`/`Back`/`Fold`) is left out: it exists to be repeated or held,
+    /// not looked up by name. `Go to <folder>` only appears for a folder this account actually
+    /// has.
+    fn commands(&self) -> Vec<crate::commands::Entry<Message>> {
+        use crate::commands::Entry;
+        let mut entries = vec![
+            Entry::new("Mark", Some("x"), Message::Mark),
+            Entry::new("Flag", Some("s"), Message::Flag),
+            Entry::new("Mark unread", Some("N"), Message::Unread),
+            Entry::new("Next unread", Some("n"), Message::NextUnread),
+            Entry::new("Archive", Some("e"), Message::Archive),
+            Entry::new("Delete", Some("d"), Message::Discard),
+            Entry::new("Undo", Some("u"), Message::Undo),
+            Entry::new("Compose", Some("m"), Message::Compose(None)),
+            Entry::new("Reply", Some("r"), Message::Compose(Some(Reply::Sender))),
+            Entry::new("Reply all", Some("R"), Message::Compose(Some(Reply::All))),
+            Entry::new("Forward", Some("f"), Message::Compose(Some(Reply::Forward))),
+            Entry::new("Search", Some("/"), Message::Search).exposed(),
+            Entry::new("Show raw source", Some("\\"), Message::Show(Showing::Source)),
+            Entry::new("Show headers", Some("H"), Message::Show(Showing::Headers)),
+            Entry::new("Show security surface", Some("!"), Message::Show(Showing::Security)),
+            Entry::new("Show original formatting", Some("o"), Message::Show(Showing::Original)),
+            Entry::new("Open elsewhere", Some("O"), Message::External),
+            Entry::new("Propose a screening rule", Some("S"), Message::Screen),
+            Entry::new("Refresh", Some("<C-r>"), Message::Refresh).exposed(),
+        ];
+        for (label, purpose, hint) in [
+            ("Go to Inbox", "inbox", "g i"),
+            ("Go to Sent", "sent", "g s"),
+            ("Go to Drafts", "drafts", "g d"),
+            ("Go to Archives", "archives", "g a"),
+            ("Go to Trash", "trash", "g t"),
+        ] {
+            if let Some(id) = self.folder_for(purpose) {
+                entries.push(Entry::new(label, Some(hint), Message::OpenFolder(id)));
+            }
+        }
+        entries
+    }
+
+    /// The currently loaded rows, as jump targets for quick-open —
+    /// `docs/command-palette-plan.md` §4.2. Only what has already paged in; a folder's own `/`
+    /// filter is still the way to reach a message quick-open hasn't loaded yet.
+    fn quick_items(&self) -> Vec<crate::commands::Entry<Message>> {
+        self.headers
+            .iter()
+            .map(|header| {
+                let label = if header.author.is_empty() {
+                    header.subject.clone()
+                } else {
+                    format!("{} — {}", header.subject, header.author)
+                };
+                crate::commands::Entry::new(label, None, Message::Select(header.id))
+            })
+            .collect()
+    }
+
+    fn resized(&mut self, shell: &Shell, now: Instant) {
+        self.motion.collapse.go_mut(self.rail_collapsed(shell.width()), now);
+    }
+
+    fn context_menu(message: &Message) -> Option<(&str, &'static str)> {
+        match message {
+            Message::ContextMenu(text, context) => Some((text, context)),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2745,6 +2797,119 @@ mod tests {
         // A count travels through the headings too: three down from the top is the last folder.
         assert_eq!(mail.perch_at(1, 3), Some(5));
         assert_eq!(mail.perch_at(1, 99), Some(5));
+    }
+
+    fn shell() -> Shell {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let which = NEXT.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("noctmalia-mail-surface-{}-{which}.sock", std::process::id()));
+        let mut shell = Shell::new(noctmalia_bridge::Bridge::spawn(path).expect("a socket"), 1180.0);
+        shell.set_connected(true);
+        shell
+    }
+
+    /// An inbox of three unread messages, listed.
+    fn inbox() -> (Mail, Shell) {
+        use serde_json::json;
+        let mut mail = Mail::new();
+        let mut shell = shell();
+        let now = Instant::now();
+        let accounts = serde_json::from_value(json!([{
+            "id": "a1", "name": "one", "type": "imap",
+            "folders": [{"id": "a1://inbox", "name": "Inbox", "path": "/inbox", "accountId": "a1",
+                         "specialUse": ["inbox"], "subFolders": []}],
+        }]))
+        .expect("accounts");
+        let _ = mail.update(Message::Accounts(Ok(accounts)), &mut shell, now);
+        let messages: Vec<serde_json::Value> = (1..=3)
+            .map(|id| {
+                json!({"id": id, "headerMessageId": format!("m{id}@x"), "subject": format!("{id}"),
+                       "author": "a@x", "date": format!("2026-09-{:02}T09:00:00Z", 20 - id), "read": false})
+            })
+            .collect();
+        let page = serde_json::from_value(json!({"id": null, "messages": messages})).expect("a page");
+        let _ = mail.update(Message::Page(1, Ok(page)), &mut shell, now);
+        (mail, shell)
+    }
+
+    fn read(mail: &Mail, id: u64) -> bool {
+        mail.header(id).expect("a header").read
+    }
+
+    /// `j` is for looking, not reading: the cursor moves, the letter shows, and nothing is marked.
+    #[test]
+    fn stepping_down_the_index_previews_without_marking_read() {
+        let (mut mail, mut shell) = inbox();
+        let now = Instant::now();
+        let _ = mail.update(Message::Step(1), &mut shell, now);
+        let _ = mail.update(Message::Step(1), &mut shell, now);
+        let second = mail.selected.expect("something is selected");
+        assert_eq!(mail.showing, Showing::Letter, "the letter under the cursor is shown");
+        assert!(!read(&mail, second), "resting the cursor on it does not read it");
+        assert!(mail.headers.iter().all(|header| !header.read));
+    }
+
+    /// Enter — walking into the pager — is what reads.
+    #[test]
+    fn entering_the_pager_marks_the_selected_message_read() {
+        let (mut mail, mut shell) = inbox();
+        let now = Instant::now();
+        let _ = mail.update(Message::Step(1), &mut shell, now);
+        let id = mail.selected.expect("selected");
+        let _ = mail.update(Message::Focus(Region::Pager), &mut shell, now);
+        assert!(read(&mail, id));
+        assert_eq!(mail.headers.iter().filter(|header| header.read).count(), 1, "only the one that was opened");
+    }
+
+    #[test]
+    fn a_click_and_next_unread_both_count_as_reading() {
+        let (mut mail, mut shell) = inbox();
+        let now = Instant::now();
+        let _ = mail.update(Message::Select(2), &mut shell, now);
+        assert!(read(&mail, 2));
+        let _ = mail.update(Message::NextUnread, &mut shell, now);
+        let opened = mail.selected.expect("selected");
+        assert_ne!(opened, 2);
+        assert!(read(&mail, opened));
+    }
+
+    /// Archiving lands the cursor on the next message without reading it for you.
+    #[test]
+    fn archiving_moves_the_cursor_on_without_marking_the_next_one_read() {
+        let (mut mail, mut shell) = inbox();
+        let now = Instant::now();
+        let _ = mail.update(Message::Select(1), &mut shell, now);
+        let _ = mail.update(Message::Archive, &mut shell, now);
+        let next = mail.selected.expect("the cursor lands on the next row");
+        assert_ne!(next, 1);
+        assert!(!read(&mail, next));
+        assert!(mail.undo.is_some(), "an archive can be undone");
+    }
+
+    /// What a confirmation says depends on what was done, not on what else is lying around.
+    #[test]
+    fn marking_read_after_an_archive_does_not_offer_to_undo_the_archive_again() {
+        let (mut mail, mut shell) = inbox();
+        let now = Instant::now();
+        let _ = mail.update(Message::Select(1), &mut shell, now);
+        let _ = mail.update(Message::Archive, &mut shell, now);
+        let _ = mail.update(Message::Acted(Did::Archived, Ok(())), &mut shell, now);
+        assert_eq!(shell.saying(), Some("Archived — u to undo"));
+        let _ = mail.update(Message::Acted(Did::Marked, Ok(())), &mut shell, now);
+        assert_eq!(shell.saying(), Some("Archived — u to undo"), "a mark-read says nothing new");
+        assert!(mail.undo.is_some(), "and does not spend the undo");
+    }
+
+    #[test]
+    fn an_archive_thunderbird_refused_forgets_its_undo() {
+        let (mut mail, mut shell) = inbox();
+        let now = Instant::now();
+        let _ = mail.update(Message::Select(1), &mut shell, now);
+        let _ = mail.update(Message::Archive, &mut shell, now);
+        let refused = Err(Error::local("no"));
+        let _ = mail.update(Message::Acted(Did::Archived, refused), &mut shell, now);
+        assert!(mail.undo.is_none(), "nothing moved, so there is nothing to put back");
     }
 
     /// Every table has to be unambiguous on its own, or a key means one thing until it means

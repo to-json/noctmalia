@@ -1,8 +1,8 @@
 "use strict";
 
-// noctmalia bridge — thin RPC executor over native messaging. Protocol: tbd/README.md.
-// All state, threading, search and policy live in mailnd; this file only maps
-// method names onto messenger.* calls and forwards events.
+// noctmalia bridge — thin RPC executor over native messaging. Protocol: docs/bridge-protocol.md.
+// All state and policy live in the client; this file only maps method names onto messenger.*
+// calls and forwards events.
 
 const PROTOCOL = 1;
 const HOST = "noctmalia.bridge";
@@ -144,6 +144,7 @@ const REPLY_TYPES = {
 const methods = {
   "bridge.ping": async () => ({ pong: Date.now() }),
   "bridge.info": info,
+  "bridge.quit": () => messenger.noctmalia.quit(),
 
   "accounts.list": ({ includeSubFolders = false } = {}) => messenger.accounts.list(includeSubFolders),
   "accounts.get": ({ accountId, includeSubFolders = false }) => messenger.accounts.get(accountId, includeSubFolders),
@@ -290,13 +291,21 @@ async function onMessage(message) {
 }
 
 function connect() {
-  port = messenger.runtime.connectNative(HOST);
-  port.onMessage.addListener(onMessage);
-  port.onDisconnect.addListener((disconnected) => {
-    console.warn("noctmalia bridge: native port closed", disconnected.error ?? "");
-    if (port === disconnected) {
-      port = null;
+  // One port at a time. A reconnect scheduled twice used to open two shims, and the client serves
+  // whichever attached first — so the hello went down the port it was not listening to.
+  if (port) {
+    return;
+  }
+  const opened = messenger.runtime.connectNative(HOST);
+  port = opened;
+  opened.onMessage.addListener(onMessage);
+  opened.onDisconnect.addListener(() => {
+    console.warn("noctmalia bridge: native port closed", opened.error ?? "");
+    if (port !== opened) {
+      // A port that was already replaced; the live one looks after itself.
+      return;
     }
+    port = null;
     setTimeout(connect, RECONNECT_MS);
   });
 }

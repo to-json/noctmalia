@@ -1,58 +1,66 @@
 # noctmalia
 
 A mail, calendar and contacts client that looks native on a [Noctalia](https://github.com/noctalia-dev/noctalia)
-desktop, with **Thunderbird as the backend**. Thunderbird runs headless in a container and keeps
-doing accounts, protocols, storage, sync and sending. We replace only the UI.
+desktop, with **Thunderbird as the backend**. noctmalia runs its own headless Thunderbird — fetched
+once, started with the window, stopped with it — which keeps doing accounts, protocols, storage,
+sync and sending. We replace only the UI, and you never see the rest.
 
-Today it is **mail and contacts**, two surfaces of one window — only one client may hold the bridge
-socket, so they cannot be two programs. `docs/mail-plan.md` is why the mail surface is shaped the
-way it is.
+Mail, people and calendar are three surfaces of one window. `docs/mail-plan.md` is why the mail
+surface is shaped the way it is; `docs/one-program-plan.md` is why there is one program.
 
 ```
-thunderbird --headless ── bridge (MailExtension) ── nm-shim ──►  noctmalia
-        in a container                                   NDJSON over a unix socket
-                                                         (the app listens; the shim connects in)
+noctmalia ──spawns──►  thunderbird --headless ── bridge (MailExtension) ── nm-shim ──►  noctmalia
+                       in noctmalia-thunderbird.scope                   NDJSON over a unix socket
+                                                                        (the app listens; the shim connects in)
 ```
 
 | Path | What |
 |---|---|
 | `flake.nix`, `scripts/` | The devshell, and the cargo/run wrappers around it |
 | `crates/noctmalia-bridge` | The protocol: binds the socket, matches replies by id, streams events |
-| `crates/noctmalia` | The app: MIME and Markdown, mail and contacts calls, vCards, theme/font, the window |
-| `tbd/` | The Thunderbird container and the bridge extension. Protocol reference: `tbd/README.md` |
-| `tools/` | `fixture.py` (the test data, mail included), `seed.sh`/`seed.py` (put it in a real profile), `fake-bridge.py` (a Thunderbird stand-in), `bridgectl.py` + `mailnd-stub.py` (a CLI path), `smoke.sh` |
+| `crates/noctmalia` | The app: MIME and Markdown, mail, people and calendar calls, vCards and iCal, theme/font, the window, and `thunderbird/`, which fetches, provisions, spawns, watches and stops the Thunderbird behind it |
+| `bridge/` | The MailExtension the app sideloads into its Thunderbird: the RPC method table and two Experiments. Protocol reference: `docs/bridge-protocol.md` |
+| `tools/` | `fixture.py` (the test data, mail included), `seed.sh`/`seed.py` (put it into the running window's Thunderbird), `fake-bridge.py` (a Thunderbird stand-in), `noctmalia-ctl.py` (the control socket's CLI), `smoke.sh` |
 | `docs/findings.md` | What has actually been verified, and the gotchas behind it |
 | `docs/design.md` | Where this is going |
 | `docs/mail-plan.md` | The mail surface: the decisions, the milestones, and what building them changed |
 | `docs/want-sequence.md` | The lazyvim/fzf-feel wishlist (`want.md`), turned into six sequenced plans |
+| `docs/one-program-plan.md` | The next step: noctmalia spawns and stops its own Thunderbird, and the container goes |
 
 ## Running it
 
 ```sh
-just                  # Thunderbird up, then the window against it
-just fake             # the window against a stand-in: no Docker, no Thunderbird
-just status           # what is up, and whether the bridge has a Thunderbird on the other end
-just seed --reset     # put the development fixture — accounts, contacts and mail — into a real profile
-just flood 500        # 500 more unremarkable messages, for a folder worth windowing
+just                  # the window. It starts its Thunderbird and stops it when closed.
+just fake             # the window against a stand-in: no Thunderbird at all, the same mail
+just dev              # the window with the bridge's dev methods on, for `just seed` and `just smoke`
+just seed --reset     # put the development fixture — accounts, contacts and mail — into it
+just status           # what is running, and what the bridge says about it
 just shots            # draw every surface headlessly and write the PNGs
 just --list           # the rest
 ```
 
-`just run` is the one to reach for. It brings the container up, closes any window already holding
-the bridge socket — only one client may — and starts a new one with the window chrome that squares
-its corners when tiled. It also waits for Thunderbird's extension to say hello, and bounces the
-container if it does not: restarting only the window can leave the shim attached with the extension
-never announcing itself again, and the symptom is a window that sits on "Waiting for Thunderbird"
-forever with nothing else visibly wrong.
+`just` is the one to reach for. The first run downloads Thunderbird 155.0.1 from Mozilla (86 MB,
+SHA-512 checked, into `$XDG_DATA_HOME/noctmalia`) and says so on the window; every run after that
+starts it in a couple of seconds. The window opens at once, on a page that says what is happening,
+and shows mail as soon as Thunderbird says hello. Closing the window asks Thunderbird to quit
+through the front door — SIGTERM is an instant death for Gecko that leaves the profile locked —
+and waits until it has.
 
-`just fake` is the fastest loop by a wide margin: no Docker, no profile, and the same deliberately
-nasty mail on screen as a real Thunderbird would serve — `tools/fixture.py` is the one definition
-and both `fake-bridge.py` and `seed.py` read it.
+Thunderbird runs in a transient systemd user scope, `noctmalia-thunderbird.scope`, so the whole
+process tree is one unit: `systemctl --user status noctmalia-thunderbird.scope` shows it, and a
+scope left behind by a noctmalia that was SIGKILLed is stopped by the next one before it starts.
+Without a systemd user session it runs in a plain process group instead. Its output goes to
+`$XDG_STATE_HOME/noctmalia/thunderbird.log`; its profile is `$XDG_DATA_HOME/noctmalia/profile`,
+private to noctmalia, and `just reset` throws it away. `NOCTMALIA_THUNDERBIRD=/path/to/thunderbird`
+uses a build you supply instead of the fetched one, which is how a package will work and the only
+way on a machine that is not x86_64.
 
-`just` comes from the devshell if it is not on your host (`nix develop -c just run`). Anything that
-touches Docker goes through `scripts/with-docker.sh`, which re-runs itself under the `docker` group
-when the socket will not answer — group membership is not live in a shell that was already open, and
-`groups` reports it before the kernel has granted it.
+`just fake` is the fastest loop by a wide margin: no Thunderbird, no profile, and the same
+deliberately nasty mail on screen as a real Thunderbird would serve — `tools/fixture.py` is the one
+definition and both `fake-bridge.py` and `seed.py` read it. It runs the window with
+`--backend external`, which only listens on the socket.
+
+`just` comes from the devshell if it is not on your host (`nix develop -c just`).
 
 ## Build and run
 
@@ -71,6 +79,11 @@ switches profile when you want a backtrace.
 
 `nix develop` reads the git tree, so `git add` a new file before the shell will see it.
 
+When it looks stuck, ask it. `tools/noctmalia-ctl.py status` says which bridge connection is being
+served, how many calls are in flight, and the slowest call so far; a call nobody answers fails
+after thirty seconds rather than spinning forever. `NOCTMALIA_TRACE=1` prints every bridge call
+with its latency on stderr, and connections are numbered there whether or not tracing is on.
+
 `scripts/run.sh` forces software rendering, because this machine's Ivy Bridge GPU renders iced as
 torn frames on both of Mesa's hardware paths (noctalia-iced's clock demo included — it is the stack,
 not this app). Set `NOCTMALIA_GPU=1` to use the GPU on hardware that works. `NOCTMALIA_FPS=1`
@@ -78,59 +91,46 @@ reports redraws/s and `view()` time; `NOCTMALIA_FPS=drive` redraws continuously 
 `NOCTMALIA_REDUCE_MOTION=1` (or `NOCTALIA_REDUCE_MOTION`) collapses every animation to a millisecond,
 and `NOCTALIA_MOTION_SCALE=8` runs them in slow motion, which is how the curves get looked at.
 
-### Against a fake Thunderbird (no container)
+### Against a fake Thunderbird
 
 ```sh
-scripts/run.sh                        # binds $XDG_RUNTIME_DIR/noctmalia/bridge.sock
-tools/fake-bridge.py                  # connects to it and serves mail and contacts from memory
+scripts/run.sh --backend external      # binds $XDG_RUNTIME_DIR/noctmalia/bridge.sock and waits
+tools/fake-bridge.py                   # connects to it and serves mail and contacts from memory
 ```
 
 `tools/fake-bridge.py --empty` serves an empty store, for the empty states. The stand-in pages
 `messages.list` five at a time on purpose: the windowed index and the progressive load are the two
 things a fake that handed everything over at once would never exercise.
 
-### Against the real thing
-
-Docker needs to be usable first. `docker.socket` is socket-activated on Arch, so group membership is
-usually the only thing missing:
+### Test data in the real thing
 
 ```sh
-sudo usermod -aG docker "$USER"    # then log out and back in, or `newgrp docker` for one shell
-```
-
-Boot a headless Thunderbird and put the test data in it:
-
-```sh
-tools/seed.sh                         # stack up, wait for the bridge, seed accounts, contacts and mail
+just dev                              # in one terminal: the window, dev methods on
+tools/seed.sh                         # in another: seed accounts, contacts and mail
 tools/seed.sh --reset                 # ...replacing what is already there
 tools/seed.sh --flood 500             # ...plus 500 unremarkable messages
 ```
 
-The accounts, the contacts and the mail all come from `tools/fixture.py`, which is also what
-`tools/fake-bridge.py` serves — so the same people and the same mail are on screen either way.
-Seeding is idempotent and keeps the profile volume; `docker compose down -v` starts over.
+Seeding goes through the control socket's `call`, which passes raw bridge methods through only
+when the window was started with `--dev`. The accounts, the contacts and the mail all come from
+`tools/fixture.py`, which is also what `tools/fake-bridge.py` serves — so the same people and the
+same mail are on screen either way. Seeding is idempotent and keeps the profile.
 
 Mail is written with `messages.import`, straight into folders with read, flagged and junk already
-set: no SMTP, no IDLE, nothing to wait for. GreenMail stays for the one thing it uniquely tests,
-which is that a message genuinely *arrives* — `tools/smoke.sh` is where that is checked, along with
-Gloda threading and search, a reply that threads, and a filter that reaches `msgFilterRules.dat`.
-
-Then hand the socket to the UI — only one client may hold it, and seeding used the CLI stub:
-
-```sh
-docker compose -f compose.yaml -f compose.ui.yaml up -d --build tbd
-scripts/run.sh
-```
-
-The overlay bind-mounts the socket directory into `$XDG_RUNTIME_DIR` — a host process cannot reach a
-named Docker volume. tbd runs as uid 1000 and the socket is mode 0660, so the desktop user must be
-uid 1000 (`id -u`). Either process can start first; the shim retries forever.
+set: no SMTP, no IDLE, nothing to wait for. GreenMail is kept for the one thing it uniquely tests,
+which is that a message genuinely *arrives*: `tools/smoke.sh` runs it in the one container left,
+on the loopback, and checks the whole round trip from a fresh profile — the window starting its
+Thunderbird, mail arriving, a send, Gloda threading and search, a reply that threads, a filter that
+reaches `msgFilterRules.dat`, a calendar event, and the window's exit taking Thunderbird down
+cleanly. Docker is only needed for that; `scripts/with-docker.sh` sorts out the group.
 
 ## Mail
 
 Three panes and three focus regions, which is mutt's shape: folders, the index, one letter. `h` and
 `l` walk between them, `j` and `k` move, `Enter` opens, and `<Space>` opens a thread — a
-conversation is one row and a number until you ask it to be more. `e` archives, `d` deletes, `u`
+conversation is one row and a number until you ask it to be more. Moving the cursor shows the
+letter under it and marks nothing: you can walk down an inbox and leave it as unread as you found
+it. Enter, `l`, a click or `n` is what reads. `e` archives, `d` deletes, `u`
 puts it back, `r`/`R`/`f` reply and forward, `S` proposes a rule from the message in front of you,
 `/` filters what is loaded and Enter searches everything. `g i`, `g s`, `g d`, `g a`, `g t` go to
 the folders those letters name, and `g m` / `g c` switch surfaces — the titlebar says which one you
@@ -154,8 +154,11 @@ were. A link whose words name one site and whose `href` is another says so, whic
 client can make on its own without trusting anybody.
 
 The loss is layout fidelity, which mail spends on making advertisements look like advertisements.
-Where it matters there are two hatches, both one key: `\` shows the source exactly as it arrived,
-and `O` hands the whole message to whatever the desktop opens `.eml` with.
+Where it matters there are three hatches, each one key: `o` lays the letter out with real CSS
+(litehtml, which has no script engine and is handed the sender's HTML only after the same
+allowlist has been written back as HTML — no `src`, no handlers, stylesheets with every `url()`
+taken out), `\` shows the source exactly as it arrived, and `O` hands the whole message to
+whatever the desktop opens `.eml` with.
 
 ### Nothing is stored outside Thunderbird
 
@@ -239,11 +242,12 @@ out.
 - **Verified by running it:** the transport (reconnect, out-of-order replies, in-flight failure on
   disconnect, the 1 MiB cap), vCard round-tripping, contacts list/search/create/update/delete, and
   the MIME and Markdown pipeline against deliberately hostile mail.
-- **Runs against a real Thunderbird** (155.0.1 headless): `tools/seed.sh` provisions two IMAP
-  accounts and writes the fixture — contacts *and* mail — into the profile. `tools/smoke.sh` covers
-  the whole round trip including Gloda threading and search, a reply that threads, and a filter that
-  reaches `msgFilterRules.dat`. Those last three ride Thunderbird internals rather than the
-  WebExtension API, so smoke is the thing to run on every Thunderbird bump.
+- **Runs its own Thunderbird** (155.0.1 headless, native, in a systemd user scope): `tools/seed.sh`
+  provisions two IMAP accounts and writes the fixture — contacts *and* mail — into its profile.
+  `tools/smoke.sh` covers the whole round trip from a fresh profile, including Gloda threading and
+  search, a reply that threads, a filter that reaches `msgFilterRules.dat`, and a clean exit. The
+  Gloda and filter steps ride Thunderbird internals rather than the WebExtension API, so smoke is
+  the thing to run on every Thunderbird bump.
 - **Checked against the widget tree, not just the parser:** `crates/noctmalia/tests/mail.rs` lays
   the real mail surface out headlessly and asserts that a newsletter full of beacons puts no tracker
   URL on screen, and that a folder of five thousand messages builds a screenful of rows rather than

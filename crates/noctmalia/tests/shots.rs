@@ -15,6 +15,7 @@ use noctmalia::calendar::{Cal, Item};
 use noctmalia::ical::{self, Event, When};
 use noctmalia::mail::{self, Reply};
 use noctmalia::shell::Shell;
+use noctmalia::surfaces::Face;
 use noctmalia::surfaces::calendar::{Calendar, Message as CalMessage};
 use noctmalia::surfaces::mail::{Mail, Message, Showing};
 use noctmalia::{font, mime, palette};

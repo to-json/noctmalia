@@ -18,6 +18,8 @@ use noctalia_iced::motion;
 use noctalia_iced::theme;
 use noctalia_iced::widgets;
 
+pub mod cursor;
+
 /// Tabler codepoints from the bundled icon font.
 pub mod icon {
     pub const ADDRESS_BOOK: char = '\u{f021}';
@@ -28,6 +30,7 @@ pub mod icon {
     pub const AT: char = '\u{ea2b}';
     pub const BUILDING: char = '\u{ea4f}';
     pub const CALENDAR: char = '\u{ea53}';
+    pub const DOWNLOAD: char = '\u{ea96}';
     pub const CHECK: char = '\u{ea5e}';
     pub const CHEVRON_DOWN: char = '\u{ea5f}';
     pub const CHEVRON_RIGHT: char = '\u{ea61}';
@@ -289,24 +292,23 @@ pub fn chip<'a, M: 'a>(label: impl text::IntoFragment<'a>, colour: Color) -> Ele
         .into()
 }
 
-/// The screen a window shows before Thunderbird has said hello.
-pub fn waiting<'a, M: 'a>(path: String) -> Element<'a, M> {
-    container(
-        iced::widget::column![
-            widgets::icon(icon::PLUG, 32.0).color(theme::palette().outline),
-            text("Waiting for Thunderbird").size(theme::FONT_TITLE).font(theme::semibold()),
-            // A socket path is one unbroken word and can be longer than the window.
-            text(format!("listening on {path}"))
-                .size(theme::FONT_CAPTION)
-                .color(theme::palette().on_surface_variant)
-                .wrapping(text::Wrapping::WordOrGlyph),
-        ]
-        .spacing(theme::SPACE_SM)
-        .align_x(Alignment::Center),
-    )
-    .center_x(Length::Fill)
-    .center_y(Length::Fill)
-    .into()
+/// The page shown until Thunderbird is up: what is happening, in a sentence, and a bar while
+/// something measurable is. Nothing about sockets is on it.
+pub fn starting<'a, M: 'a>(glyph: char, title: &'a str, detail: String, progress: Option<f32>) -> Element<'a, M> {
+    let mut lines = iced::widget::column![
+        widgets::icon(glyph, 32.0).color(theme::palette().outline),
+        text(title).size(theme::FONT_TITLE).font(theme::semibold()),
+        text(detail)
+            .size(theme::FONT_CAPTION)
+            .color(theme::palette().on_surface_variant)
+            .wrapping(text::Wrapping::WordOrGlyph),
+    ]
+    .spacing(theme::SPACE_SM)
+    .align_x(Alignment::Center);
+    if let Some(fraction) = progress {
+        lines = lines.push(iced::widget::progress_bar(0.0..=1.0, fraction).length(240.0).girth(6.0));
+    }
+    container(lines).center_x(Length::Fill).center_y(Length::Fill).into()
 }
 
 /// An empty pane saying what would be in it.

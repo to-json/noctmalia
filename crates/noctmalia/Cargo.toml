@@ -34,6 +34,8 @@ serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 tokio.workspace = true
+# `prctl(PR_SET_PDEATHSIG)` and `kill(2)` for the Thunderbird this process spawns; see `thunderbird`.
+libc = "0.2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

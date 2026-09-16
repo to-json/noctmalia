@@ -2,7 +2,8 @@
 
 use crate::people::{self, AddressBook, Contact};
 use crate::shell::Shell;
-use crate::surfaces::{self, Pressed, Surface};
+use crate::surfaces::{self, Face, Pressed, Surface};
+use crate::ui::cursor::{self, Cursor};
 use crate::ui::{
     self, AVATAR, AVATAR_LARGE, MARK, ROW_GAP, avatar, bar_gutter, caption, danger_button, ghost_button, glyph_button,
     hairline_x, hairline_y, icon, initial, nearness, row_style, selection_bar,
@@ -11,7 +12,7 @@ use crate::vcard::{self, Card, Entry};
 use iced::advanced::widget::Id;
 use iced::keyboard::{Key, Modifiers};
 use iced::widget::operation;
-use iced::widget::scrollable::{AbsoluteOffset, Viewport};
+use iced::widget::scrollable::Viewport;
 use iced::widget::tooltip;
 use iced::widget::{button, column, container, mouse_area, row, scrollable, space, stack, text, text_input};
 use iced::{Alignment, Animation, Element, Length, Padding, Task, border};
@@ -19,6 +20,7 @@ use noctalia_iced::keymap::{self, Keymap};
 use noctalia_iced::motion::{self, Replay};
 use noctalia_iced::theme::{self, ButtonVariant};
 use noctalia_iced::widgets;
+use serde_json::Value;
 use std::time::Instant;
 
 /// Wide enough for the books Thunderbird ships with — "Personal Address Book" is 21 characters and
@@ -180,18 +182,14 @@ pub enum Message {
 /// row before it reached the second. A [`Replay`] holds no value and starts over on command, which
 /// is what an arrival needs: the pane rises the same way every time its contents change.
 struct Motion {
-    /// Which row the contact list's selection bar is travelling to, counted from the top.
-    contact: Animation<f32>,
-    /// Whether that bar is on screen at all — it fades rather than blinking out.
-    contact_shown: Animation<bool>,
-    /// The same, for the address-book rail. "All contacts" is row 0, so the rail always has one.
-    book: Animation<f32>,
+    /// The contact list's selection bar.
+    contact: Cursor,
+    /// The address-book rail's. "All contacts" is row 0, so the rail always has one.
+    book: Cursor,
     /// The detail pane arriving, replayed whenever what it shows changes.
     detail: Replay,
     /// The contact list arriving, staggered down the rows.
     reveal: Replay,
-    /// The notice banner opening and closing.
-    notice: Animation<bool>,
     /// The rail trading its labels for icons.
     collapse: Animation<bool>,
     /// The editor's avatar taking the accent, once what is being typed amounts to a name.
@@ -201,12 +199,10 @@ struct Motion {
 impl Motion {
     fn new() -> Motion {
         Motion {
-            contact: motion::spring_animation(0.0),
-            contact_shown: motion::glide_animation(false),
-            book: motion::spring_animation(0.0),
+            contact: Cursor::hidden(),
+            book: Cursor::seated(0.0),
             detail: Replay::settled(motion::SETTLE, motion::NORMAL),
             reveal: Replay::settled(motion::GLIDE, motion::SLOW),
-            notice: motion::settle_animation(false),
             collapse: motion::settle_animation(false),
             identity: motion::glide_animation(false),
         }
@@ -215,12 +211,10 @@ impl Motion {
     /// Whether anything still has somewhere to be. The window only subscribes to frames while this
     /// holds, so an idle rolodex costs nothing.
     fn animating(&self, now: Instant) -> bool {
-        self.contact.is_animating(now)
-            || self.contact_shown.is_animating(now)
-            || self.book.is_animating(now)
+        self.contact.animating(now)
+            || self.book.animating(now)
             || self.detail.is_animating(now)
             || self.reveal.is_animating(now)
-            || self.notice.is_animating(now)
             || self.collapse.is_animating(now)
             || self.identity.is_animating(now)
     }
@@ -275,16 +269,6 @@ impl People {
         }
     }
 
-    pub fn update(&mut self, message: Message, shell: &mut Shell, now: Instant) -> Task<Message> {
-        let task = self.step(message, shell, now);
-        // Almost anything can have opened or closed the detail pane, or changed how much room there
-        // is for it, and `step` returns from a dozen places. Deciding here catches all of them;
-        // re-aiming an animation at the value it already holds is a no-op.
-        self.motion.collapse.go_mut(self.rail_collapsed(shell.width()), now);
-        self.motion.identity.go_mut(self.editor_named(), now);
-        task
-    }
-
     fn step(&mut self, message: Message, shell: &mut Shell, now: Instant) -> Task<Message> {
         match message {
             Message::ContextMenu(..) => {}
@@ -295,10 +279,10 @@ impl People {
                 }
                 // The rail's rows just changed underneath the bar; put it where it belongs without
                 // travelling there.
-                self.motion.book = motion::spring_animation(self.book_row());
+                self.motion.book.seat(Some(self.book_row()), now);
                 return self.reload(shell);
             }
-            Message::Books(Err(error)) => shell.fail(error, now),
+            Message::Books(Err(error)) => shell.report(&error, now),
 
             Message::Loaded(generation, result) => {
                 // A reply from a search the user has already typed past.
@@ -331,13 +315,13 @@ impl People {
                             }
                         }
                     }
-                    Err(error) => shell.fail(error, now),
+                    Err(error) => shell.report(&error, now),
                 }
             }
 
             Message::SelectBook(book) => {
                 self.book = book;
-                self.motion.book.go_mut(self.book_row(), now);
+                self.motion.book.aim(Some(self.book_row()), now);
                 return self.reload(shell);
             }
             Message::Query(query) => {
@@ -424,7 +408,7 @@ impl People {
                 shell.announce("Saved", now);
                 return self.reload(shell);
             }
-            Message::Saved(Err(error)) => shell.fail(error, now),
+            Message::Saved(Err(error)) => shell.report(&error, now),
 
             Message::AskDelete => self.confirming_delete = true,
             Message::Delete => {
@@ -441,7 +425,7 @@ impl People {
                 shell.announce("Deleted", now);
                 return self.reload(shell);
             }
-            Message::Deleted(Err(error)) => shell.fail(error, now),
+            Message::Deleted(Err(error)) => shell.report(&error, now),
 
             Message::Traverse(forwards) => {
                 return if forwards { operation::focus_next() } else { operation::focus_previous() };
@@ -531,41 +515,21 @@ impl People {
 
     /// Sends the selection bar to the selected row, fading it out if there is no longer one.
     fn aim_selection(&mut self, now: Instant) {
-        if let Some(row) = self.selected_row() {
-            self.motion.contact.go_mut(row, now);
-            self.motion.contact_shown.go_mut(true, now);
-        } else {
-            self.motion.contact_shown.go_mut(false, now);
-        }
+        self.motion.contact.aim(self.selected_row(), now);
     }
 
     /// Scrolls the list the shortest distance that brings the selected row fully into view, and
     /// not at all if it is already there. Without a viewport to compare against — before the list
     /// has ever scrolled — there is nothing to decide with, and short lists never need it.
     fn follow_selection(&self) -> Task<Message> {
-        let (Some(row), Some(view)) = (self.selected_row(), self.list_view) else {
-            return Task::none();
-        };
-        let offset = view.absolute_offset().y;
-        let height = view.bounds().height;
-        let top = row * CONTACT_PITCH;
-        let bottom = top + CONTACT_ROW;
-        let target = if top < offset {
-            top
-        } else if bottom > offset + height {
-            bottom - height
-        } else {
-            return Task::none();
-        };
-        operation::scroll_to(Id::new(LIST_ID), AbsoluteOffset { x: 0.0, y: target.max(0.0) })
+        let row = self.selected_row().map(|row| row as usize);
+        cursor::follow(row, CONTACT_PITCH, CONTACT_ROW, self.list_view, Id::new(LIST_ID))
     }
 
     /// Puts the bar on the selected row without travelling: for when the rows underneath it have
     /// changed and the distance between them no longer means anything.
     fn seat_selection(&mut self, now: Instant) {
-        let row = self.selected_row();
-        self.motion.contact = motion::spring_animation(row.unwrap_or(0.0));
-        self.motion.contact_shown.go_mut(row.is_some(), now);
+        self.motion.contact.seat(self.selected_row(), now);
     }
 
     fn has(&self, id: &str) -> bool {
@@ -586,79 +550,6 @@ impl People {
             .or_else(|| self.books.iter().find(|book| !book.read_only).map(|book| book.id.clone()))
     }
 
-    /// What is half-typed, for the titlebar.
-    pub fn typed(&self) -> String {
-        self.pending.typed()
-    }
-
-    /// The entrance, replayed: switching to a surface should look like arriving at it.
-    pub fn entered(&mut self, now: Instant) {
-        self.motion.reveal.restart(now);
-        self.motion.detail.restart(now);
-        self.pending.clear();
-    }
-
-    /// One key press, against the rolodex's own table.
-    pub fn press(&mut self, key: &Key, modifiers: Modifiers) -> Pressed<Message> {
-        match KEYS.with(|keys| keys.press(&mut self.pending, key, modifiers)) {
-            keymap::Resolved::Ignored => Pressed::Ignored,
-            keymap::Resolved::Pending => Pressed::Pending,
-            keymap::Resolved::Action(Binding::Go(surface), _) => Pressed::Switch(surface),
-            keymap::Resolved::Action(binding, count) => Pressed::Act(match binding {
-                Binding::Down => Message::Step(count as i32),
-                Binding::Up => Message::Step(-(count as i32)),
-                Binding::Top => Message::Edge(false),
-                Binding::Bottom => Message::Edge(true),
-                Binding::Search => Message::Search,
-                Binding::New => Message::New,
-                Binding::Edit => Message::Edit,
-                Binding::Save => Message::Save,
-                Binding::Delete => Message::AskDelete,
-                Binding::Escape => Message::Escape,
-                Binding::Go(_) => unreachable!("handled above"),
-            }),
-        }
-    }
-
-    /// Everything again, from nothing. Thunderbird saying hello is also Thunderbird having
-    /// restarted under a live socket, so this is a resync rather than a first load.
-    pub fn resync(&mut self, shell: &Shell) -> Task<Message> {
-        Task::perform(people::books(shell.bridge()), Message::Books)
-    }
-
-    /// The keybound actions worth finding by name — `docs/command-palette-plan.md` §3.2. Pure
-    /// cursor movement (`Binding::Down`/`Up`/`Top`/`Bottom`) is left out: it exists to be
-    /// repeated, not looked up.
-    pub fn commands(&self) -> Vec<crate::commands::Entry<Message>> {
-        use crate::commands::Entry;
-        vec![
-            Entry::new("Search", Some("/"), Message::Search).exposed(),
-            Entry::new("New contact", Some("n"), Message::New),
-            Entry::new("Edit contact", Some("e"), Message::Edit),
-            Entry::new("Save", Some("<C-s>"), Message::Save),
-            Entry::new("Delete contact", Some("d"), Message::AskDelete),
-        ]
-    }
-
-    /// The currently loaded rows, as jump targets for quick-open —
-    /// `docs/command-palette-plan.md` §4.2.
-    pub fn quick_items(&self) -> Vec<crate::commands::Entry<Message>> {
-        self.contacts
-            .iter()
-            .map(|contact| crate::commands::Entry::new(contact.card.display_name(), None, Message::Select(contact.id.clone())))
-            .collect()
-    }
-
-    /// A forwarded Thunderbird event. Any address-book change invalidates the list; a rolodex is
-    /// small, and reloading it beats patching rows from payloads that only sometimes carry the
-    /// whole contact.
-    pub fn notify(&mut self, name: &str, shell: &Shell) -> Task<Message> {
-        if name.starts_with("contacts.") || name.starts_with("addressBooks.") {
-            return self.reload(shell);
-        }
-        Task::none()
-    }
-
     fn reload(&mut self, shell: &Shell) -> Task<Message> {
         self.generation += 1;
         let generation = self.generation;
@@ -677,26 +568,10 @@ impl People {
         Task::perform(load, move |result| Message::Loaded(generation, result))
     }
 
-    pub fn view(&self, shell: &Shell, now: Instant) -> Element<'_, Message> {
-        row![self.rail(now), hairline_y(), self.list(now), hairline_y(), self.detail(shell, now)]
-            .height(Length::Fill)
-            .into()
-    }
-
-    /// Whether anything is still on its way somewhere.
-    pub fn animating(&self, now: Instant) -> bool {
-        self.motion.animating(now)
-    }
-
-    /// Whether a contact is being created or edited — `docs/mode-visual-plan.md`'s "compose" mode.
-    pub fn composing(&self) -> bool {
-        self.editor.is_some()
-    }
-
     fn rail(&self, now: Instant) -> Element<'_, Message> {
         // Where the bar is this frame, in rows. The rows read their fill off it too, so the quiet
         // surface behind the selection travels with the bar instead of jumping ahead of it.
-        let at = self.motion.book.interpolate_with(|row| row, now);
+        let at = self.motion.book.at(now);
         // How much of the rail's writing is left. The width and the text fade together, so the
         // labels are gone by the time there is no room for them rather than being cut off mid-word.
         let showing = 1.0 - self.motion.collapse.interpolate(0.0, 1.0, now).clamp(0.0, 1.0);
@@ -780,10 +655,10 @@ impl People {
             container(caption(message)).center_x(Length::Fill).padding(theme::SPACE_MD).into()
         } else {
             let reveal = self.motion.reveal.linear(now);
-            let at = self.motion.contact.interpolate_with(|row| row, now);
+            let at = self.motion.contact.at(now);
             // Nothing selected fades the bar out rather than blinking it away, and takes the rows'
             // fill with it.
-            let shown = self.motion.contact_shown.interpolate(0.0, 1.0, now);
+            let shown = self.motion.contact.presence(now);
 
             let mut rows = column![].spacing(ROW_GAP);
             for (index, contact) in self.contacts.iter().enumerate() {
@@ -1326,6 +1201,123 @@ fn edit(card: &mut Card, field: Field, value: String) {
 fn set(entries: &mut [Entry], index: usize, apply: impl FnOnce(&mut Entry)) {
     if let Some(entry) = entries.get_mut(index) {
         apply(entry);
+    }
+}
+
+impl Face for People {
+    type Message = Message;
+    const SURFACE: Surface = Surface::People;
+
+    fn update(&mut self, message: Message, shell: &mut Shell, now: Instant) -> Task<Message> {
+        let task = self.step(message, shell, now);
+        // Almost anything can have opened or closed the detail pane, or changed how much room there
+        // is for it, and `step` returns from a dozen places. Deciding here catches all of them;
+        // re-aiming an animation at the value it already holds is a no-op.
+        self.motion.collapse.go_mut(self.rail_collapsed(shell.width()), now);
+        self.motion.identity.go_mut(self.editor_named(), now);
+        task
+    }
+
+    fn view(&self, shell: &Shell, now: Instant) -> Element<'_, Message> {
+        row![self.rail(now), hairline_y(), self.list(now), hairline_y(), self.detail(shell, now)]
+            .height(Length::Fill)
+            .into()
+    }
+
+    /// One key press, against the rolodex's own table.
+    fn press(&mut self, key: &Key, modifiers: Modifiers) -> Pressed<Message> {
+        match KEYS.with(|keys| keys.press(&mut self.pending, key, modifiers)) {
+            keymap::Resolved::Ignored => Pressed::Ignored,
+            keymap::Resolved::Pending => Pressed::Pending,
+            keymap::Resolved::Action(Binding::Go(surface), _) => Pressed::Switch(surface),
+            keymap::Resolved::Action(binding, count) => Pressed::Act(match binding {
+                Binding::Down => Message::Step(count as i32),
+                Binding::Up => Message::Step(-(count as i32)),
+                Binding::Top => Message::Edge(false),
+                Binding::Bottom => Message::Edge(true),
+                Binding::Search => Message::Search,
+                Binding::New => Message::New,
+                Binding::Edit => Message::Edit,
+                Binding::Save => Message::Save,
+                Binding::Delete => Message::AskDelete,
+                Binding::Escape => Message::Escape,
+                Binding::Go(_) => unreachable!("handled above"),
+            }),
+        }
+    }
+
+    /// A forwarded Thunderbird event. Any address-book change invalidates the list; a rolodex is
+    /// small, and reloading it beats patching rows from payloads that only sometimes carry the
+    /// whole contact.
+    fn notify(&mut self, name: &str, _data: &Value, shell: &Shell) -> Task<Message> {
+        if name.starts_with("contacts.") || name.starts_with("addressBooks.") {
+            return self.reload(shell);
+        }
+        Task::none()
+    }
+
+    /// Everything again, from nothing. Thunderbird saying hello is also Thunderbird having
+    /// restarted under a live socket, so this is a resync rather than a first load.
+    fn resync(&mut self, shell: &Shell) -> Task<Message> {
+        Task::perform(people::books(shell.bridge()), Message::Books)
+    }
+
+    /// The entrance, replayed: switching to a surface should look like arriving at it.
+    fn entered(&mut self, now: Instant) {
+        self.motion.reveal.restart(now);
+        self.motion.detail.restart(now);
+        self.pending.clear();
+    }
+
+    /// Whether anything is still on its way somewhere.
+    fn animating(&self, now: Instant) -> bool {
+        self.motion.animating(now)
+    }
+
+    /// What is half-typed, for the titlebar.
+    fn typed(&self) -> String {
+        self.pending.typed()
+    }
+
+    /// Whether a contact is being created or edited — `docs/mode-visual-plan.md`'s "compose" mode.
+    fn composing(&self) -> bool {
+        self.editor.is_some()
+    }
+
+    /// The keybound actions worth finding by name — `docs/command-palette-plan.md` §3.2. Pure
+    /// cursor movement (`Binding::Down`/`Up`/`Top`/`Bottom`) is left out: it exists to be
+    /// repeated, not looked up.
+    fn commands(&self) -> Vec<crate::commands::Entry<Message>> {
+        use crate::commands::Entry;
+        vec![
+            Entry::new("Search", Some("/"), Message::Search).exposed(),
+            Entry::new("New contact", Some("n"), Message::New),
+            Entry::new("Edit contact", Some("e"), Message::Edit),
+            Entry::new("Save", Some("<C-s>"), Message::Save),
+            Entry::new("Delete contact", Some("d"), Message::AskDelete),
+        ]
+    }
+
+    /// The currently loaded rows, as jump targets for quick-open —
+    /// `docs/command-palette-plan.md` §4.2.
+    fn quick_items(&self) -> Vec<crate::commands::Entry<Message>> {
+        self.contacts
+            .iter()
+            .map(|contact| {
+                crate::commands::Entry::new(contact.card.display_name(), None, Message::Select(contact.id.clone()))
+            })
+            .collect()
+    }
+
+    fn resized(&mut self, shell: &Shell, now: Instant) {
+        self.motion.collapse.go_mut(self.rail_collapsed(shell.width()), now);
+    }
+
+    fn context_menu(message: &Message) -> Option<(&str, &'static str)> {
+        match message {
+            Message::ContextMenu(text, context) => Some((text, context)),
+            _ => None,
+        }
     }
 }
 

@@ -264,7 +264,7 @@ impl Recur {
         }
     }
 
-    fn decode(rrule: Option<&str>) -> Recur {
+    pub fn decode(rrule: Option<&str>) -> Recur {
         match rrule {
             None => Recur::None,
             Some("FREQ=DAILY") => Recur::Daily,

@@ -178,6 +178,10 @@ async fn creates_updates_and_deletes_an_event() {
     let items = calendar::items(bridge.clone(), vec!["personal".to_string()], start, end).await.expect("items");
     assert!(items.iter().any(|item| item.id == created.id));
 
+    let fetched = calendar::get(bridge.clone(), "personal".to_string(), created.id.clone()).await.expect("get");
+    assert_eq!(fetched.id, created.id);
+    assert_eq!(fetched.event.summary, "Kickoff");
+
     let mut edited = created.event.clone();
     edited.summary = "Kickoff (moved)".to_string();
     let updated =

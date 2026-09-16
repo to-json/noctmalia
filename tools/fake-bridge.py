@@ -449,6 +449,11 @@ def handle(store, method, params, emit):
             wanted = [wanted]
         found = store.items_in_range(wanted, params.get("rangeStart"), params.get("rangeEnd"))
         return [{"id": event["id"], "calendarId": event["calendarId"], "item": event["item"]} for event in found]
+    if method == "calendar.items.get":
+        event = store.events.get(params["id"])
+        if event is None:
+            raise KeyError(f"no item {params['id']}")
+        return {"id": event["id"], "calendarId": event["calendarId"], "item": event["item"]}
     if method == "calendar.items.create":
         event_id = f"event{next(store.ids)}"
         event = {"id": event_id, "calendarId": params["calendarId"], "item": params["item"]}

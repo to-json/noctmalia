@@ -14,6 +14,7 @@ use iced::Theme;
 use noctmalia::mail;
 use noctmalia::mime;
 use noctmalia::shell::Shell;
+use noctmalia::surfaces::Face;
 use noctmalia::surfaces::mail::{Mail, Message, Region, Showing};
 use noctmalia_bridge::Bridge;
 use serde_json::json;

@@ -66,6 +66,27 @@ pub fn to_markdown(html: &str) -> Converted {
     writer.finish()
 }
 
+/// The document again as HTML, built from the same allowlist [`to_markdown`] reads from — for
+/// handing to a layout engine that will draw it as sent.
+///
+/// The same order of operations as the Markdown path, and for the same reason: this starts from
+/// nothing and adds what is allowed, so what it does not recognise is already gone. Every
+/// element the parser drops stays dropped (`script`, `iframe`, `object`, forms). Of what is
+/// left, an element keeps only the attributes on the allowlist: no `src`, no `on*`, no
+/// `background`, and an `href` only with a scheme a link may keep. Stylesheets survive, because
+/// they are what "original formatting" means, with every `url(...)`, `@import` and
+/// `expression(...)` taken out of them — the engine underneath never fetches anything either,
+/// which makes this the belt to its braces. A NUL byte, which the engine's C string cannot hold,
+/// does not survive at all.
+pub fn restrict(html: &str) -> String {
+    let nodes = parse_with(&html.replace('\0', ""), true);
+    let mut out = String::with_capacity(html.len());
+    for node in &nodes {
+        write_html(node, &mut out);
+    }
+    out
+}
+
 // ── The tree ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
@@ -97,6 +118,13 @@ fn implied_close(opening: &str, open: &str) -> bool {
 }
 
 fn parse(html: &str) -> Vec<Node> {
+    parse_with(html, false)
+}
+
+/// `keep_style` keeps `<style>` elements, their text as their one child, for [`restrict`]; the
+/// Markdown path has no use for a stylesheet and drops them with everything else that executes
+/// or fetches.
+fn parse_with(html: &str, keep_style: bool) -> Vec<Node> {
     let mut roots: Vec<Node> = Vec::new();
     // Each level is the element being filled and the children it has so far.
     let mut stack: Vec<(String, BTreeMap<String, String>, Vec<Node>)> = Vec::new();
@@ -175,7 +203,13 @@ fn parse(html: &str) -> Vec<Node> {
         if DROPPED.contains(&name.as_str()) {
             // The contents go with it. Raw text elements (`script`, `style`) are skipped by
             // scanning for the close tag, because their bodies are not markup and may contain `<`.
-            at = skip_to_close(html, at, &name);
+            let after = skip_to_close(html, at, &name);
+            if keep_style && name == "style" {
+                let close = html[at..after].to_ascii_lowercase().rfind("</style").map_or(after, |offset| at + offset);
+                let sheet = Node::Text(html[at..close].to_string());
+                push(&mut stack, &mut roots, Node::Element { name, attributes, children: vec![sheet] });
+            }
+            at = after;
             continue;
         }
         while stack.last().is_some_and(|(open, _, _)| implied_close(&name, open)) {
@@ -265,6 +299,157 @@ fn tag(inside: &str) -> (String, BTreeMap<String, String>, bool) {
         rest = rest.trim_start();
     }
     (name, attributes, self_closing)
+}
+
+// ── Writing HTML back ───────────────────────────────────────────────────────
+
+/// Attributes any surviving element may keep. Presentation and structure, nothing that names a
+/// resource or a handler.
+const KEPT_ATTRIBUTES: &[&str] = &[
+    "align",
+    "alt",
+    "bgcolor",
+    "border",
+    "cellpadding",
+    "cellspacing",
+    "class",
+    "color",
+    "colspan",
+    "dir",
+    "face",
+    "height",
+    "id",
+    "lang",
+    "role",
+    "rowspan",
+    "size",
+    "start",
+    "style",
+    "title",
+    "type",
+    "valign",
+    "width",
+];
+
+fn write_html(node: &Node, out: &mut String) {
+    let (name, attributes, children) = match node {
+        Node::Text(text) => {
+            escape_html(text, out);
+            return;
+        }
+        Node::Element { name, attributes, children } => (name.as_str(), attributes, children),
+    };
+    if DROPPED.contains(&name) && name != "style" {
+        return;
+    }
+    out.push('<');
+    out.push_str(name);
+    for (key, value) in attributes {
+        let value = match key.as_str() {
+            "style" => scrub_css(value),
+            "href" if name == "a" => {
+                let href = value.trim();
+                if !SCHEMES.iter().any(|scheme| href.to_ascii_lowercase().starts_with(scheme)) {
+                    continue;
+                }
+                href.to_string()
+            }
+            key if KEPT_ATTRIBUTES.contains(&key) => value.clone(),
+            _ => continue,
+        };
+        out.push(' ');
+        out.push_str(key);
+        out.push_str("=\"");
+        escape_attribute(&value, out);
+        out.push('"');
+    }
+    out.push('>');
+    if VOID.contains(&name) {
+        return;
+    }
+    if name == "style" {
+        // A stylesheet's text is CSS, not markup; entity-escaping it would break every selector.
+        for child in children {
+            if let Node::Text(css) = child {
+                out.push_str(&scrub_css(css));
+            }
+        }
+    } else {
+        for child in children {
+            write_html(child, out);
+        }
+    }
+    out.push_str("</");
+    out.push_str(name);
+    out.push('>');
+}
+
+fn escape_html(text: &str, out: &mut String) {
+    for character in text.chars() {
+        match character {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            other => out.push(other),
+        }
+    }
+}
+
+fn escape_attribute(text: &str, out: &mut String) {
+    for character in text.chars() {
+        match character {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            other => out.push(other),
+        }
+    }
+}
+
+/// CSS with everything that could name a resource taken out: `url(...)` becomes `none`, an
+/// `@import` goes up to its semicolon, and `expression(...)` — script in a property, from an
+/// Internet Explorer nobody should still meet — goes along with its argument.
+fn scrub_css(css: &str) -> String {
+    let lowered = css.to_ascii_lowercase();
+    let mut out = String::with_capacity(css.len());
+    let mut at = 0;
+    while at < css.len() {
+        let rest = &lowered[at..];
+        if rest.starts_with("@import") {
+            at += rest.find(';').map_or(rest.len(), |end| end + 1);
+            continue;
+        }
+        if rest.starts_with("url(") || rest.starts_with("expression(") {
+            // Through the parenthesis that balances the one just matched: `expression(f(x))`
+            // has one inside it.
+            let open = rest.find('(').expect("just matched a parenthesis");
+            let mut depth = 0usize;
+            let mut close = rest.len();
+            for (offset, character) in rest[open..].char_indices() {
+                match character {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            close = open + offset + 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if rest.starts_with("url(") {
+                out.push_str("none");
+            }
+            at += close;
+            continue;
+        }
+        let character = css[at..].chars().next().expect("inside the string");
+        out.push(character);
+        at += character.len_utf8();
+    }
+    out
 }
 
 // ── Entities ────────────────────────────────────────────────────────────────
@@ -1051,6 +1236,48 @@ mod tests {
         assert_eq!(md(""), "");
         assert_eq!(md("<html><body></body></html>"), "");
         assert_eq!(md("   \n  "), "");
+    }
+
+    // ── restrict: the same allowlist, written back as HTML ──────────────────────
+
+    #[test]
+    fn restricted_html_keeps_the_letter_and_nothing_that_executes_or_fetches() {
+        let hostile = concat!(
+            "<html><head><script>steal()</script></head><body>",
+            "<p onclick=\"steal()\" style=\"color:red;background:url(https://evil.example/px)\">safe words</p>",
+            "<img src=\"https://evil.example/beacon.gif\" alt=\"a cat\" width=\"1\">",
+            "<a href=\"javascript:alert(1)\">click me</a> <a href=\"https://ok.example/\" target=\"_blank\">fine</a>",
+            "<iframe src=\"https://evil.example/\"></iframe><form action=\"https://evil.example/\"><input name=\"x\"></form>",
+            "</body></html>"
+        );
+        let out = restrict(hostile);
+        for forbidden in
+            ["evil.example", "script", "onclick", "src=", "iframe", "javascript", "url(", "target=", "input", "action="]
+        {
+            assert!(!out.contains(forbidden), "{forbidden} survived:\n{out}");
+        }
+        assert!(out.contains("<p style=\"color:red;background:none\">safe words</p>"), "{out}");
+        assert!(out.contains("<img alt=\"a cat\" width=\"1\">"), "{out}");
+        assert!(out.contains("click me"), "the words stay when the link goes");
+        assert!(out.contains("<a href=\"https://ok.example/\">fine</a>"), "{out}");
+    }
+
+    #[test]
+    fn a_stylesheet_survives_with_its_fetches_taken_out() {
+        let html = "<style>@import url(https://evil.example/x.css); p { background: url('https://evil.example/bg') } b { color: #333 }</style><p>x</p>";
+        let out = restrict(html);
+        assert!(!out.contains("evil.example"), "{out}");
+        assert!(out.contains("b { color: #333 }"), "the rest of the sheet is intact: {out}");
+        assert!(out.contains("p { background: none }"), "{out}");
+        assert_eq!(scrub_css("width: expression(alert(1)); color: red"), "width: ; color: red");
+    }
+
+    #[test]
+    fn a_plain_document_comes_back_as_itself_and_a_nul_does_not_come_back_at_all() {
+        assert_eq!(restrict("<p>marketing</p>"), "<p>marketing</p>");
+        assert_eq!(restrict("<p>a &amp; b &lt; c</p><br>"), "<p>a &amp; b &lt; c</p><br>");
+        assert_eq!(restrict("<p>be\0fore</p>"), "<p>before</p>");
+        assert_eq!(restrict(r#"<td colspan="2" title="a > b">x</td>"#), r#"<td colspan="2" title="a &gt; b">x</td>"#);
     }
 
     /// An attribute value may hold anything, including the character that ends a tag.

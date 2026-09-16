@@ -27,6 +27,12 @@
 > are shown read-only and round-tripped, never edited) and a Tasks view — see the plan this was
 > built from for the reasoning, same shape as mail-plan.md's own cuts.
 >
+> **2026-09-15: there is one program.** noctmalia spawns and stops its own Thunderbird natively, in
+> a systemd user scope, from a pinned build it fetches once — `docs/one-program-plan.md`, and
+> `findings.md` §11 for what the native bring-up found. The container this document assumes
+> everywhere below (`tbd`, compose overlays, uid 1000, "only one client may hold the socket" as a
+> thing the user meets) is gone. The transport and the extension are unchanged.
+>
 > **2026-09-15: OAuth2 (Gmail, IMAP) is in progress** — see `docs/oauth-plan.md`. The plan's central
 > question is answered: Thunderbird's own baked-in Gmail OAuth client works with no Google Cloud
 > project of our own, confirmed by completing real consent through the account wizard in a

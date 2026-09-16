@@ -62,21 +62,22 @@ CONTACTS = [
                         [("internet", "noreply@lists.example")])),
 ]
 
-# Two mailboxes, so mail between them can be tested without leaving the stack. These are the exact
-# parameters `dev.provisionAccount` takes; the hostnames are compose service names. `seed.sh`
-# exports `greenmail-users` from here, so adding an account needs no change to compose.yaml.
+# Two mailboxes, so mail between them can be tested without leaving the machine. These are the
+# exact parameters `dev.provisionAccount` takes; the host is the GreenMail `tools/smoke.sh` runs on
+# the loopback, and `smoke.sh` exports `greenmail-users` from here, so adding an account needs no
+# change anywhere else.
 ACCOUNTS = [
     {
         "name": "greenmail", "email": "j@noctmalia.test", "fullName": "J",
-        "imap": {"host": "greenmail", "port": 3143, "socketType": "plain",
+        "imap": {"host": "127.0.0.1", "port": 3143, "socketType": "plain",
                  "username": "j", "password": "secret"},
-        "smtp": {"host": "greenmail", "port": 3025, "socketType": "plain", "auth": "none"},
+        "smtp": {"host": "127.0.0.1", "port": 3025, "socketType": "plain", "auth": "none"},
     },
     {
         "name": "greenmail-dana", "email": "dana@noctmalia.test", "fullName": "Dana Okoro",
-        "imap": {"host": "greenmail", "port": 3143, "socketType": "plain",
+        "imap": {"host": "127.0.0.1", "port": 3143, "socketType": "plain",
                  "username": "dana", "password": "secret"},
-        "smtp": {"host": "greenmail", "port": 3025, "socketType": "plain", "auth": "none"},
+        "smtp": {"host": "127.0.0.1", "port": 3025, "socketType": "plain", "auth": "none"},
     },
 ]
 
