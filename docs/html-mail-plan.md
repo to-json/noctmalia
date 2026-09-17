@@ -281,3 +281,34 @@ real nested tables, not just the synthetic corpus.
 
 **Still not root-caused**: *why* the font-system lock panics in the live app at all. The fix makes
 it survivable, not diagnosed. If it recurs, that's the next thread to pull.
+
+## The recurrence: catching the panic isn't the same as un-poisoning the lock (2026-09-16)
+
+"It recurs" arrived as "we crash a lot" — worse than the original bug, not the same one. The
+trampoline's `catch_unwind` does exactly what it says: it stops that one panic from unwinding into
+litehtml's C++ stack. It does nothing about `iced::advanced::graphics::text::font_system()` itself
+— a `std::sync::RwLock`, shared by every `iced::widget::text` in the window, not just this reader —
+which poisons itself the moment a panic unwinds through a held guard, whether or not something
+downstream catches that panic afterward. `Paragraph::with_text` takes that lock with
+`.expect("Write font system")`; once poisoned, every ordinary widget that calls it — the message
+list, a subject line, anything with text — panics too, unprotected, on its very next redraw. One
+bad HTML message poisoning the lock once was enough to turn every following screen into a crash,
+which is what "a lot" actually meant: not litehtml crashing repeatedly, the rest of the app doing it
+after litehtml poisoned something it doesn't even know exists.
+
+Reproducing the original trigger under `cargo test` — including against the real system font
+(`the_real_system_font_against_the_same_fixture_does_not_crash`, since the existing regression test
+measured against `Font::DEFAULT`, not what `main.rs` actually installs via
+`font::adopt_system_families()`) — still doesn't panic outside the live app. That question is
+exactly where the last pass left it: open. What changed is that it no longer needs answering to
+stop the cascade. `measure` in `crates/noctmalia/src/surfaces/html_view.rs` now wraps its own call
+in `catch_unwind` and, on panic, calls `font_system().clear_poison()` before falling back to the
+guessed width — the one place in the call chain that both sees the panic and knows the lock exists.
+`measure_clears_a_poisoned_font_system_lock_instead_of_leaving_it_for_everyone_else` poisons the
+real global lock from another thread, calls `measure`, and then constructs an ordinary
+`Paragraph::with_text` exactly as any unrelated widget would — proving the rest of the window
+survives past the one bad call, independent of ever diagnosing what the first panic actually was.
+
+**Still not root-caused, still open**: the same question as before, now provably separate from the
+cascade it used to cause. If it recurs, only the one HTML message will glitch — and this is where to
+look for what triggers the underlying panic in the first place.
