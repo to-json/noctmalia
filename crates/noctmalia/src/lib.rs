@@ -26,7 +26,7 @@ pub mod font;
 pub mod ical;
 pub mod mail;
 pub mod mime;
-pub mod palette;
+pub use noctalia_iced::palette;
 pub mod people;
 pub mod shell;
 pub mod surfaces;

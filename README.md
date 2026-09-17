@@ -33,6 +33,13 @@ noctmalia ──spawns──►  thunderbird --headless ── bridge (MailExten
 
 ## Running it
 
+you're gonna need another repo as a repo peer. this will ship as
+dependencies later, but, i didn't feel like sorting it at the time.
+
+clone to-json/noctalia-iced into the same parent. then
+
+
+
 ```sh
 just                  # run it
 just fake             # fake it

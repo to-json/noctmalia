@@ -256,7 +256,7 @@ impl App {
             keys(),
             iced::window::resize_events().map(|(_, size)| Message::Resized(size.width)),
             Subscription::run_with(Feed(self.shell.bridge()), feed),
-            Subscription::run(palette_changes),
+            palette::subscription().map(Message::Palette),
             Subscription::run_with(ControlFeed(Arc::clone(&self.control)), control_feed),
             Subscription::run(sigterm),
             Subscription::run(sigint),
@@ -989,15 +989,6 @@ fn signal_stream(kind: tokio::signal::unix::SignalKind) -> impl iced::futures::S
         };
         signal.recv().await?;
         Some((Message::Quit, Some(signal)))
-    })
-}
-
-/// Palette changes from the Noctalia shell. One watcher per process: the subscription has no input
-/// to key on, so iced keeps a single instance of it alive for the life of the application.
-fn palette_changes() -> impl iced::futures::Stream<Item = Message> {
-    let (_, changes) = palette::watch();
-    iced::futures::stream::unfold(changes, |mut changes| async move {
-        changes.next().await.map(|palette| (Message::Palette(palette), changes))
     })
 }
 
