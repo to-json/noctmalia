@@ -68,19 +68,37 @@ impl Cache {
 /// (`iced_graphics::text::Paragraph`, the same one that will later actually paint it) — not a
 /// per-character guess. This is what makes litehtml's line breaks land close to where the text it
 /// hands back will really wrap once painted; see `litehtml_sys::render_with_measure`.
+///
+/// Wrapped in its own `catch_unwind`, independent of `litehtml_sys`'s trampoline (which also
+/// catches this, so the panic never unwinds into litehtml's C++ stack — see that crate for why
+/// that specifically is undefined behaviour). What only this call site can do is clean up after
+/// itself: `Paragraph::with_text` takes iced's *global*, process-wide font-system lock
+/// (`iced::advanced::graphics::text::font_system()`, a `std::sync::RwLock` shared with every
+/// ordinary `iced::widget::text` in the window) and panics via `.expect("Write font system")` if
+/// it is already poisoned. A panic anywhere while that lock is held poisons it — whether or not
+/// the panic is caught — so leaving it poisoned after this call turns one bad HTML message into
+/// every other screen in the app panicking on its very next redraw, unprotected, for the rest of
+/// the process. That cascade, not the original panic, is what "crashes a lot" was: clearing the
+/// poison here is what stops it from outliving this one call.
 fn measure(text: &str, size_px: i32) -> i32 {
-    let paragraph = Paragraph::with_text(iced::advanced::text::Text {
-        content: text,
-        bounds: Size::INFINITE,
-        size: Pixels(size_px as f32),
-        line_height: iced::advanced::text::LineHeight::default(),
-        font: theme::font(),
-        align_x: iced::advanced::text::Alignment::Default,
-        align_y: iced::alignment::Vertical::Top,
-        shaping: iced::advanced::text::Shaping::Advanced,
-        wrapping: iced::advanced::text::Wrapping::None,
-    });
-    paragraph.min_width().ceil() as i32
+    let measured = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let paragraph = Paragraph::with_text(iced::advanced::text::Text {
+            content: text,
+            bounds: Size::INFINITE,
+            size: Pixels(size_px as f32),
+            line_height: iced::advanced::text::LineHeight::default(),
+            font: theme::font(),
+            align_x: iced::advanced::text::Alignment::Default,
+            align_y: iced::alignment::Vertical::Top,
+            shaping: iced::advanced::text::Shaping::Advanced,
+            wrapping: iced::advanced::text::Wrapping::None,
+        });
+        paragraph.min_width().ceil() as i32
+    }));
+    measured.unwrap_or_else(|_| {
+        iced::advanced::graphics::text::font_system().clear_poison();
+        text.chars().count() as i32 * (size_px * 3 / 5)
+    })
 }
 
 /// Renders `html` — already through `mime::html::restrict`; this module trusts its caller for
@@ -159,6 +177,91 @@ mod tests {
         let html = include_str!("fixtures/security-alert.html");
         let rendered = render_with_measure(html, 380, i32::MAX);
         assert!(!rendered.primitives.is_empty());
+    }
+
+    /// The regression test above measures against `theme::font()`'s untouched default
+    /// (`Font::DEFAULT`, since nothing in a `cargo test` process calls `main`'s startup sequence),
+    /// which is not what a real window measures against: `main.rs` calls
+    /// `font::adopt_system_families()` and `theme::set_font(font::ui())` before the first frame,
+    /// pointing `sans-serif` at whatever fontconfig resolves on the machine (here, real Noto Sans),
+    /// not iced's built-in fallback. If the live crash is a real shaping bug rather than lock
+    /// contention, it should need the real font's real glyph data to trigger — reproducing it here
+    /// is cheaper than reproducing it in the windowed app.
+    #[test]
+    fn the_real_system_font_against_the_same_fixture_does_not_crash() {
+        crate::font::adopt_system_families();
+        theme::set_font(crate::font::ui());
+        let html = include_str!("fixtures/security-alert.html");
+        for width in [60, 120, 200, 260, 320, 380, 440, 520, 600, 760, 900] {
+            let rendered = render_with_measure(html, width, i32::MAX);
+            assert!(!rendered.primitives.is_empty(), "width {width}");
+        }
+    }
+
+    /// The actual mechanism behind "we crash a lot": `catch_unwind` in `litehtml_sys`'s trampoline
+    /// stops a panic from unwinding into litehtml's C++ stack, but it does not — cannot — undo the
+    /// poisoning a `std::sync::RwLock` does automatically when a panic unwinds through a held
+    /// guard. Left alone, one bad HTML message poisons iced's *global* font-system lock, and every
+    /// ordinary `iced::widget::text` in the rest of the window — nothing to do with litehtml —
+    /// inherits that poison and panics on its own next redraw, unprotected. This proves `measure`
+    /// clears the poison it finds, so the rest of the app survives past the one bad call.
+    #[test]
+    fn measure_clears_a_poisoned_font_system_lock_instead_of_leaving_it_for_everyone_else() {
+        let lock = iced::advanced::graphics::text::font_system();
+        let _ = std::thread::spawn(|| {
+            let _guard = iced::advanced::graphics::text::font_system().write().expect("not poisoned yet");
+            panic!("simulated: some shaping bug panicking mid-layout while holding the write lock");
+        })
+        .join();
+        assert!(lock.is_poisoned(), "the setup should have poisoned it, or this test proves nothing");
+
+        let width = measure("hello", 14);
+        assert!(width > 0, "still returns a usable fallback width rather than propagating the panic");
+        assert!(!lock.is_poisoned(), "measure must clear the poison, not just survive its own call");
+
+        // The real proof: an ordinary widget elsewhere in the app, with no idea litehtml exists,
+        // must not inherit the poison and panic on the very next redraw.
+        let paragraph = Paragraph::with_text(iced::advanced::text::Text {
+            content: "ordinary UI text, nothing to do with HTML mail",
+            bounds: Size::INFINITE,
+            size: Pixels(14.0),
+            line_height: iced::advanced::text::LineHeight::default(),
+            font: theme::font(),
+            align_x: iced::advanced::text::Alignment::Default,
+            align_y: iced::alignment::Vertical::Top,
+            shaping: iced::advanced::text::Shaping::Basic,
+            wrapping: iced::advanced::text::Wrapping::None,
+        });
+        assert!(paragraph.min_width() > 0.0);
+    }
+
+    /// `measure()` alone stops at shaping — text width, never a rasterized glyph. The two tests
+    /// above prove the same fixture, at the same widths, through the real font, never panics
+    /// there — but the live crash was in `draw_background`, deep inside a *paint*, and nothing
+    /// above ever paints. `iced_tiny_skia` (the software backend `run.sh` forces on this machine —
+    /// see the memory note on hardware rendering) rasterizes each glyph with
+    /// `swash::get_image_uncached` and then `tiny_skia::PixmapRef::from_bytes(buffer, w, h)
+    /// .expect("Create glyph pixel map")`: a panic site if swash ever hands back a buffer whose
+    /// length doesn't match `w * h * 4`, which only a real `draw()` call can reach. `iced_test`'s
+    /// `Simulator` drives that same real renderer headlessly (already used for `tests/shots.rs`'s
+    /// PNGs), so routing `view()` through it — real font, same fixture, same width sweep — is the
+    /// cheapest way to find out whether painting, not measuring, is where this actually breaks.
+    #[test]
+    fn the_real_renderer_paints_the_same_fixture_without_crashing() {
+        crate::font::adopt_system_families();
+        theme::set_font(crate::font::ui());
+        let html = include_str!("fixtures/security-alert.html");
+        let settings = iced::Settings { default_font: crate::font::ui(), ..iced::Settings::default() };
+        for width in [60, 120, 200, 260, 320, 380, 440, 520, 600, 760, 900] {
+            let cache = Cache::default();
+            let element = view::<()>(html, &cache);
+            let mut simulator = iced_test::Simulator::with_size(
+                settings.clone(),
+                Size::new(width as f32, 4000.0),
+                element,
+            );
+            simulator.snapshot(&iced::Theme::Dark).unwrap_or_else(|e| panic!("width {width}: {e:?}"));
+        }
     }
 
     fn render_with_measure(html: &str, width: i32, height: i32) -> litehtml_sys::Rendered {
